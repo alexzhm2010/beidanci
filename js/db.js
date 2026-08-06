@@ -343,34 +343,17 @@ App.DB = (function () {
     return words;
   }
 
-  /** 计算单词的下次复习时间 (与 algorithm.js 保持一致) */
+  /** 计算单词的下次复习时间 — 直接委托给 algorithm.js, 消除重复逻辑 */
   function getNextReviewTime(word) {
-    if (!word.totalCount || word.totalCount === 0) return 0;
-    // 优先使用已存储的 nextReviewAt
-    if (word.nextReviewAt && word.nextReviewAt > 0) return word.nextReviewAt;
-    // 从 lastLearnTime + stability 推算
-    var lastLearn = word.lastLearnTime || 0;
-    var stability = word.stability || 0;
-    if (lastLearn && stability > 0) return lastLearn + stability;
-    // 退化: 用算法模块的函数 (如果可用)
+    // algorithm.js 在本文件之后加载, 但本函数在运行期(用户点击复习)才调用,
+    // 此时 App.Algorithm 已就绪
     if (App.Algorithm && App.Algorithm.getNextReviewAt) {
       return App.Algorithm.getNextReviewAt(word);
     }
-    return lastLearn; // 没有 stability 数据时, 视为到期
-  }
-
-  /** 计算单词的稳定度 (优先使用数据库存储值) */
-  function calcStability(word) {
-    // 如果数据库已存储 stability, 直接使用
-    if (word.stability && word.stability > 0) return word.stability;
-    // 否则根据熟练度推算
+    // 极简兜底 (algorithm.js 加载异常时)
     if (!word.totalCount || word.totalCount === 0) return 0;
-    var ratio = word.knownCount / word.totalCount;
-    var cfg = App.Config;
-    if (ratio >= 0.85) return cfg.REVIEW_INTERVAL_MAX;
-    if (ratio >= 0.6) return 21 * 86400000;
-    if (ratio >= 0.3) return 7 * 86400000;
-    return cfg.REVIEW_INTERVAL_MIN_FAIL;
+    if (word.nextReviewAt && word.nextReviewAt > 0) return word.nextReviewAt;
+    return (word.lastLearnTime || 0) + (word.stability || 0);
   }
 
   /** 获取单词总数 (Prefer: count=exact + 后备分页计数) */
@@ -495,20 +478,44 @@ App.DB = (function () {
       return { words: sliced, total: total };
     }
 
-    // 有查询: 拉取全量后过滤
-    var all = await getAllWords();
-    var filtered = all.filter(function (w) {
-      return (w.word || '').toLowerCase().includes(q) ||
-             (w.chineseMeaning || '').toLowerCase().includes(q);
-    });
-    var total = filtered.length;
-    filtered.sort(function (a, b) {
+    // 有查询: 用 PostgREST or + ilike 在数据库层过滤, 避免全量拉取
+    // (原实现 getAllWords() 会把整个词库拉到前端再 filter, 词库一大就慢)
+    var sc = getSyncCode();
+    var qEnc = encodeURIComponent(q);
+    // * 是 PostgREST ilike 的通配符; 同时匹配 word 和 chinese_meaning
+    var orFilter = 'or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
+
+    // 1. 获取匹配总数 (Prefer: count=exact)
+    var total = 0;
+    try {
+      var countResp = await api('GET', 'words',
+        'sync_code=eq.' + encodeURIComponent(sc) + '&' + orFilter + '&limit=1',
+        null, { returnResponse: true, count: 'exact' });
+      total = extractTotalFromRange(countResp);
+    } catch (e) {}
+    if (!total) return { words: [], total: 0 };
+
+    // 2. 拉取匹配数据 (上限 500, 供前端熟练度精细排序)
+    //    注: PostgREST 无法按 known_count/total_count 比值排序, 故前端再排一次
+    var FETCH_MAX = 500;
+    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
+      '&' + orFilter +
+      '&order=total_count.asc.nullsfirst,created_at.asc' +
+      '&limit=' + FETCH_MAX;
+    var rows = await api('GET', 'words', params);
+    if (!rows) return { words: [], total: total };
+
+    // 3. 前端按熟练度精细排序 (与空查询分支保持一致)
+    var words = rows.map(rowToWord);
+    words.sort(function (a, b) {
       var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
       var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
       if (pa !== pb) return pa - pb;
       return (a.createdAt || 0) - (b.createdAt || 0);
     });
-    return { words: filtered.slice(offset, offset + limit), total: total };
+
+    // 4. 分页切片
+    return { words: words.slice(offset, offset + limit), total: total };
   }
 
   /** 批量导入: mode = 'overwrite' | 'incremental' */
@@ -516,9 +523,8 @@ App.DB = (function () {
     var sc = getSyncCode();
 
     if (mode === 'overwrite') {
-      // 清空现有词库和记录
-      await clearWords();
-      await api('DELETE', 'records', 'sync_code=eq.' + encodeURIComponent(sc));
+      // 清空现有词库和记录 (走 RPC, records 表已撤销 anon DELETE 权限)
+      await rpc('clear_user_data', { p_sync_code: sc });
     }
 
     // 增量模式: 只拉取已有单词的 word + id + 统计字段 (减少传输量)
@@ -605,14 +611,13 @@ App.DB = (function () {
   // ========== 清空操作 ==========
 
   async function clearWords() {
-    var sc = getSyncCode();
-    await api('DELETE', 'words', 'sync_code=eq.' + encodeURIComponent(sc));
+    // 走 RPC: records 表已撤销 anon DELETE, 必须通过 SECURITY DEFINER 函数清理
+    await rpc('clear_user_data', { p_sync_code: getSyncCode() });
   }
 
   async function clearAll() {
-    await clearWords();
-    var sc = getSyncCode();
-    await api('DELETE', 'records', 'sync_code=eq.' + encodeURIComponent(sc));
+    // clear_user_data 同时清空 words 和 records
+    await rpc('clear_user_data', { p_sync_code: getSyncCode() });
   }
 
   /** 按单词文本精确查找 (不区分大小写) */

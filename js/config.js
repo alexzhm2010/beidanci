@@ -136,7 +136,8 @@ App.Config = {
 
   // MyMemory 翻译API — 填入邮箱可将免费额度从 5000字符/天 提升到 50000字符/天
   // 留空则匿名调用 (按IP限额)
-  TRANSLATE_API_EMAIL: 'REDACTED_EMAIL',
+  // ⚠️ 请勿将个人邮箱提交到仓库, 在本地填写后不要 git add config.js
+  TRANSLATE_API_EMAIL: '',
 
   // ====== Supabase 配置 (在此填写你的项目信息) ======
   // 1. 登录 supabase.com 创建项目
