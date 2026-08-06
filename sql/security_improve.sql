@@ -56,6 +56,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- 撤销原全开放策略
 DROP POLICY IF EXISTS "records_all_anon" ON records;
+-- 撤销可能已存在的新策略 (使脚本可重复执行)
+DROP POLICY IF EXISTS "records_select" ON records;
+DROP POLICY IF EXISTS "records_insert" ON records;
 
 -- 学习记录只允许: SELECT(统计查询) / INSERT(写入学习结果)
 CREATE POLICY "records_select" ON records
