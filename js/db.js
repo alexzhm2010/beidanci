@@ -321,13 +321,12 @@ App.DB = (function () {
   /** 获取复习候选词 (已学习过的, 按下次复习时间排序) */
   async function getReviewCandidates(count) {
     var sc = getSyncCode();
-    // 多拉 2 倍, 供算法筛选
+    // 多拉 3 倍, 供算法筛选 (抽样需要足够候选池)
     var limit = Math.min(count * 3, 500);
-    // 注: next_review_at 是计算字段, 不存在于数据库
-    // 先拉取已学单词, 再在 JS 中排序
+    // 按 next_review_at 升序: 到期的词排前面, 确保优先拉取最该复习的
     var params = 'sync_code=eq.' + encodeURIComponent(sc) +
       '&total_count=gt.0' +
-      '&order=last_learn_time.asc.nullsfirst' +
+      '&order=next_review_at.asc.nullsfirst' +
       '&limit=' + limit;
     var rows = await api('GET', 'words', params);
     if (!rows) return [];
