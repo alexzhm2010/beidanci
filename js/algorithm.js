@@ -215,8 +215,13 @@ App.Algorithm = (function () {
     for (var i = 0; i < keys.length; i++) {
       var bucket = buckets[keys[i]];
       shuffle(bucket);
-      // 每组最多取 (count * ratio) 或剩余所需, 取较小者
-      var take = Math.min(bucket.length, Math.ceil(count * ratio), count - result.length);
+      var remaining = count - result.length;
+      var isLastBucket = (i === keys.length - 1);
+      // 非最后桶: 限制每组最多取 count*ratio, 留名额给低优先级组
+      // 最后桶: 不再限制 ratio, 兜底取够所需 (避免单桶时取不够)
+      var take = isLastBucket
+        ? Math.min(bucket.length, remaining)
+        : Math.min(bucket.length, Math.ceil(count * ratio), remaining);
       for (var j = 0; j < take; j++) {
         result.push(bucket[j]);
       }
@@ -228,7 +233,7 @@ App.Algorithm = (function () {
   function shuffle(arr) {
     for (var i = arr.length - 1; i > 0; i--) {
       var j = Math.floor(Math.random() * (i + 1));
-      var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+      arr[i] = arr[j] = arr[i], arr[j] = arr[j];
     }
   }
 
@@ -237,80 +242,26 @@ App.Algorithm = (function () {
   /**
    * 计算熟练度 (0~1)
    */
-  function calcProficiency(word) {
-    if (!word.totalCount || word.totalCount === 0) return 0;
+  function getProficiency(word) {
+    if (!word || !word.totalCount || word.totalCount === 0) return 0;
     return word.knownCount / word.totalCount;
   }
 
   /**
-   * 获取熟练度等级描述
+   * 获取熟练度等级文本
    */
-  function getProficiencyLevel(word) {
-    var p = calcProficiency(word);
-    if (!word.totalCount || word.totalCount === 0) return { label: '未学习', color: '#999' };
-    if (p < 0.3) return { label: '生疏', color: '#e74c3c' };
-    if (p < 0.6) return { label: '一般', color: '#f39c12' };
-    if (p < 0.85) return { label: '熟悉', color: '#3498db' };
-    return { label: '掌握', color: '#27ae60' };
+  function getProficiencyLabel(word) {
+    var p = getProficiency(word);
+    if (p === 0) return '未学';
+    if (p < 0.4) return '生疏';
+    if (p < 0.7) return '熟悉';
+    if (p < 0.9) return '熟练';
+    return '掌握';
   }
 
-  /**
-   * 格式化"下次复习"剩余时间
-   */
-  function formatNextReview(word) {
-    if (!word.totalCount || word.totalCount === 0) return '未学习';
-    var nextAt = getNextReviewAt(word);
-    var diff = nextAt - Date.now();
-    if (diff <= 0) return '待复习';
-    var min = Math.floor(diff / 60000);
-    var hour = Math.floor(diff / 3600000);
-    var day = Math.floor(diff / 86400000);
-    if (day > 0) return day + '天后';
-    if (hour > 0) return hour + '小时后';
-    if (min > 0) return min + '分钟后';
-    return '即将';
-  }
-
-  /**
-   * 格式化上次"记得"距今的时间
-   */
-  function formatTimeSince(word) {
-    if (!word.lastKnownTime) return '从未';
-    var elapsed = Date.now() - word.lastKnownTime;
-    var min = Math.floor(elapsed / 60000);
-    var hour = Math.floor(elapsed / 3600000);
-    var day = Math.floor(elapsed / 86400000);
-    if (day > 0) return day + '天前';
-    if (hour > 0) return hour + '小时前';
-    if (min > 0) return min + '分钟前';
-    return '刚刚';
-  }
-
-  /**
-   * 获取到期词数量 (统计 Dashboard 用)
-   */
-  function getDueCount(allWords) {
-    var now = Date.now();
-    return allWords.filter(function (w) {
-      return w.totalCount && w.totalCount > 0 && now >= getNextReviewAt(w);
-    }).length;
-  }
-
-  /**
-   * 获取快到期 (未来 N 小时内) 的词数量
-   */
-  function getUpcomingCount(allWords, hours) {
-    var now = Date.now();
-    var threshold = now + hours * 3600000;
-    return allWords.filter(function (w) {
-      if (!w.totalCount || w.totalCount === 0) return false;
-      var nextAt = getNextReviewAt(w);
-      return nextAt > now && nextAt <= threshold;
-    }).length;
-  }
+  // ==================== 导出 ====================
 
   return {
-    // 算法核心
     getStability: getStability,
     getNextReviewAt: getNextReviewAt,
     isDue: isDue,
@@ -318,13 +269,7 @@ App.Algorithm = (function () {
     updateWordStats: updateWordStats,
     selectNewWords: selectNewWords,
     selectReviewWords: selectReviewWords,
-    // 展示辅助
-    calcProficiency: calcProficiency,
-    getProficiencyLevel: getProficiencyLevel,
-    formatNextReview: formatNextReview,
-    formatTimeSince: formatTimeSince,
-    // 统计用
-    getDueCount: getDueCount,
-    getUpcomingCount: getUpcomingCount,
+    getProficiency: getProficiency,
+    getProficiencyLabel: getProficiencyLabel,
   };
 })();
