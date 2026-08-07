@@ -46,7 +46,9 @@ App.showConfirm = function (message, onConfirm) {
 App.updateSyncCodeBadge = function () {
   var code = App.DB.getSyncCode();
   var ver = App.Config.APP_VERSION;
-  document.getElementById('syncCodeBadge').textContent = '用户名: ' + code + '  |  v' + ver;
+  var badge = '用户名: ' + code + '  |  v' + ver;
+  if (App.DBConfig.isBeta()) badge += '  |  BETA';
+  document.getElementById('syncCodeBadge').textContent = badge;
 };
 
 App.switchTab = function (tabName) {

@@ -150,18 +150,34 @@ App.Config = {
   // 留空则匿名调用 (按IP限额)
   TRANSLATE_API_EMAIL: 'alexzhm@126.com',
 
-  // ====== Supabase 配置 (在此填写你的项目信息) ======
-  // 1. 登录 supabase.com 创建项目
-  // 2. 执行 supabase.sql 建表
-  // 3. 在 Settings > API 中复制 URL 和 anon key 填入下方
+  // ====== Supabase 配置 ======
+  // 正式环境 (主线 https://alexzhm2010.github.io/beidanci/)
   SUPABASE_URL: 'https://gjtjivmxxelnousbqmok.supabase.co',
   SUPABASE_ANON_KEY: 'sb_publishable_BM_REPSHCEDqbVGD2hrblA_EtMq_9RN',
+
+  // Beta 测试环境 (独立 Supabase 项目, 与正式环境完全隔离)
+  // 部署在 /beta/ 路径时自动使用此配置
+  // 1. 在 Supabase 创建新项目 (与正式项目独立的数据库)
+  // 2. 依次执行 supabase.sql + sql/preset_library.sql 建表
+  // 3. 在 Settings > API 中复制 URL 和 anon key 填入下方
+  BETA_SUPABASE_URL: '',
+  BETA_SUPABASE_ANON_KEY: '',
 };
 
-// ========== Supabase 连接配置 (读取 App.Config) ==========
+// ========== Supabase 连接配置 (根据部署路径自动切换环境) ==========
 App.DBConfig = {
-  getUrl: function () { return App.Config.SUPABASE_URL || ''; },
-  getKey: function () { return App.Config.SUPABASE_ANON_KEY || ''; },
+  // 检测当前是否为 beta 测试环境 (URL 路径包含 /beta/)
+  isBeta: function () {
+    return window.location.pathname.indexOf('/beta/') !== -1;
+  },
+  getUrl: function () {
+    if (this.isBeta()) return App.Config.BETA_SUPABASE_URL || '';
+    return App.Config.SUPABASE_URL || '';
+  },
+  getKey: function () {
+    if (this.isBeta()) return App.Config.BETA_SUPABASE_ANON_KEY || '';
+    return App.Config.SUPABASE_ANON_KEY || '';
+  },
   isConfigured: function () {
     var url = this.getUrl();
     var key = this.getKey();
