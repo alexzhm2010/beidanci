@@ -82,8 +82,8 @@ App.Config = {
   // ========== 授权系统配置 ==========
   AUTH: {
     TRIAL_DAYS: 7,                    // 试用期天数
-    ADMIN_CODE: 'REDACTED_ADMIN_USERNAME',     // 管理员用户名
-    APP_SALT: 'REDACTED_APP_SALT',// 密码加密盐
+    ADMIN_CODE: 'beidanci_admin',     // 管理员用户名（仅用于后台权限校验，非超级密钥）
+    APP_SALT: 'bx_word_2026_salt_k3y',// 密码哈希加盐（仅用于本地哈希计算，即使暴露也无法单独解密密码）
     WECHAT_ID: '',                    // 捐赠联系微信 (稍后填写)
     WECHAT_QR: '',                    // 微信收款码图片路径 (稍后填写)
   },
