@@ -125,79 +125,93 @@ App.Profile = (function () {
       return;
     }
 
-    // 普通用户 → 显示账户信息
-    var authStatus = await App.Auth.checkAuth(username);
-    var authInfo = await App.DB.getAuthorization(username);
-    var userAuth = await App.DB.getUserAuth(username);
-
-    var statusText, statusClass;
-    if (authStatus === 'authorized') {
-      if (authInfo && authInfo.expiresAt) {
-        var expDate = new Date(authInfo.expiresAt);
-        var daysLeft = Math.ceil((expDate - Date.now()) / (24 * 60 * 60 * 1000));
-        statusText = '已授权 (至 ' + App.Utils.formatDate(expDate.getTime()) + '，剩余' + daysLeft + '天)';
-        statusClass = 'success';
-      } else {
-        statusText = '已授权 (永久)';
-        statusClass = 'success';
-      }
-    } else if (authStatus === 'trial') {
-      var createdDate = userAuth ? new Date(userAuth.createdAt) : new Date();
-      var trialEnd = createdDate.getTime() + App.Config.AUTH.TRIAL_DAYS * 24 * 60 * 60 * 1000;
-      var trialDaysLeft = Math.ceil((trialEnd - Date.now()) / (24 * 60 * 60 * 1000));
-      statusText = '试用中 (剩余' + trialDaysLeft + '天)';
-      statusClass = 'warning';
-    } else if (authStatus === 'expired') {
-      statusText = '授权已过期';
-      statusClass = 'danger';
-    } else {
-      statusText = '未授权';
-      statusClass = 'danger';
-    }
-
-    var regDate = userAuth ? App.Utils.formatDate(new Date(userAuth.createdAt).getTime()) : '-';
-
-    var html =
-      '<div class="profile-section">' +
-        '<div class="stats-section-title">账户信息</div>' +
-        '<div class="chart-card">' +
-          '<div class="profile-row"><span class="profile-label">用户名</span><span class="profile-value">' + App.Utils.escapeHtml(username) + '</span></div>' +
-          '<div class="profile-row"><span class="profile-label">注册时间</span><span class="profile-value">' + regDate + '</span></div>' +
-          '<div class="profile-row"><span class="profile-label">授权状态</span><span class="profile-value ' + statusClass + '">' + statusText + '</span></div>' +
-          '<div class="profile-row"><span class="profile-label">密保问题</span><span class="profile-value">' + (userAuth ? App.Utils.escapeHtml(userAuth.secQuestion) : '-') + '</span></div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="profile-section">' +
-        '<div class="stats-section-title">账户管理</div>' +
-        '<div class="chart-card">' +
-          '<button class="btn btn-outline profile-btn" id="btnChgPwd">修改密码</button>' +
-          '<button class="btn btn-outline profile-btn" id="btnChgSec">修改密保问题</button>' +
-          '<button class="btn btn-outline profile-btn" id="btnDonation">捐赠支持</button>' +
-          '<button class="btn btn-danger profile-btn" id="btnLogout">退出登录</button>' +
-        '</div>' +
-      '</div>' +
-      '<div class="profile-section">' +
-        '<div class="stats-section-title">关于</div>' +
-        '<div class="chart-card" style="text-align:center;">' +
-          '<p style="font-size:16px;font-weight:600;color:var(--color-primary);margin-bottom:4px;">背单词</p>' +
-          '<p style="font-size:13px;color:var(--color-text-light);">v' + App.Config.APP_VERSION + '</p>' +
-        '</div>' +
-      '</div>';
-
     var container = document.querySelector('#view-profile .profile-content');
-    if (container) container.innerHTML = html;
+    if (!container) return;
 
-    // 绑定事件
-    var btnChgPwd = document.getElementById('btnChgPwd');
-    if (btnChgPwd) btnChgPwd.addEventListener('click', function () { App.Auth.changePasswordForm(); });
-    var btnChgSec = document.getElementById('btnChgSec');
-    if (btnChgSec) btnChgSec.addEventListener('click', function () { App.Auth.changeSecQuestionForm(); });
-    var btnDonation = document.getElementById('btnDonation');
-    if (btnDonation) btnDonation.addEventListener('click', function () { App.Auth.showDonationPage(); });
-    var btnLogout = document.getElementById('btnLogout');
-    if (btnLogout) btnLogout.addEventListener('click', function () {
-      App.showConfirm('确定要退出登录吗？', function () { App.Auth.logout(); });
-    });
+    try {
+      // 普通用户 → 显示账户信息
+      var authStatus = await App.Auth.checkAuth(username);
+      var authInfo = await App.DB.getAuthorization(username);
+      var userAuth = await App.DB.getUserAuthInfo(username);
+
+      var statusText, statusClass;
+      if (authStatus === 'authorized') {
+        if (authInfo && authInfo.expiresAt) {
+          var expDate = new Date(authInfo.expiresAt);
+          var daysLeft = Math.ceil((expDate - Date.now()) / (24 * 60 * 60 * 1000));
+          statusText = '已授权 (至 ' + App.Utils.formatDate(expDate.getTime()) + '，剩余' + daysLeft + '天)';
+          statusClass = 'success';
+        } else {
+          statusText = '已授权 (永久)';
+          statusClass = 'success';
+        }
+      } else if (authStatus === 'trial') {
+        var createdDate = userAuth ? new Date(userAuth.createdAt) : new Date();
+        var trialEnd = createdDate.getTime() + App.Config.AUTH.TRIAL_DAYS * 24 * 60 * 60 * 1000;
+        var trialDaysLeft = Math.ceil((trialEnd - Date.now()) / (24 * 60 * 60 * 1000));
+        statusText = '试用中 (剩余' + trialDaysLeft + '天)';
+        statusClass = 'warning';
+      } else if (authStatus === 'expired') {
+        statusText = '授权已过期';
+        statusClass = 'danger';
+      } else {
+        statusText = '未授权';
+        statusClass = 'danger';
+      }
+
+      var regDate = userAuth ? App.Utils.formatDate(new Date(userAuth.createdAt).getTime()) : '-';
+
+      var html =
+        '<div class="profile-section">' +
+          '<div class="stats-section-title">账户信息</div>' +
+          '<div class="chart-card">' +
+            '<div class="profile-row"><span class="profile-label">用户名</span><span class="profile-value">' + App.Utils.escapeHtml(username) + '</span></div>' +
+            '<div class="profile-row"><span class="profile-label">注册时间</span><span class="profile-value">' + regDate + '</span></div>' +
+            '<div class="profile-row"><span class="profile-label">授权状态</span><span class="profile-value ' + statusClass + '">' + statusText + '</span></div>' +
+            '<div class="profile-row"><span class="profile-label">密保问题</span><span class="profile-value">' + (userAuth ? App.Utils.escapeHtml(userAuth.secQuestion) : '-') + '</span></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="profile-section">' +
+          '<div class="stats-section-title">账户管理</div>' +
+          '<div class="chart-card">' +
+            '<button class="btn btn-outline profile-btn" id="btnChgPwd">修改密码</button>' +
+            '<button class="btn btn-outline profile-btn" id="btnChgSec">修改密保问题</button>' +
+            '<button class="btn btn-outline profile-btn" id="btnDonation">捐赠支持</button>' +
+            '<button class="btn btn-danger profile-btn" id="btnLogout">退出登录</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="profile-section">' +
+          '<div class="stats-section-title">关于</div>' +
+          '<div class="chart-card" style="text-align:center;">' +
+            '<p style="font-size:16px;font-weight:600;color:var(--color-primary);margin-bottom:4px;">背单词</p>' +
+            '<p style="font-size:13px;color:var(--color-text-light);">v' + App.Config.APP_VERSION + '</p>' +
+          '</div>' +
+        '</div>';
+
+      container.innerHTML = html;
+
+      // 绑定事件
+      var btnChgPwd = document.getElementById('btnChgPwd');
+      if (btnChgPwd) btnChgPwd.addEventListener('click', function () { App.Auth.changePasswordForm(); });
+      var btnChgSec = document.getElementById('btnChgSec');
+      if (btnChgSec) btnChgSec.addEventListener('click', function () { App.Auth.changeSecQuestionForm(); });
+      var btnDonation = document.getElementById('btnDonation');
+      if (btnDonation) btnDonation.addEventListener('click', function () { App.Auth.showDonationPage(); });
+      var btnLogout = document.getElementById('btnLogout');
+      if (btnLogout) btnLogout.addEventListener('click', function () {
+        App.showConfirm('确定要退出登录吗？', function () { App.Auth.logout(); });
+      });
+    } catch (e) {
+      console.error('[Profile.showProfile] 加载失败:', e);
+      container.innerHTML =
+        '<div class="profile-section">' +
+          '<div class="chart-card" style="text-align:center;padding:30px;">' +
+            '<p style="color:var(--color-danger);margin-bottom:8px;">加载失败</p>' +
+            '<p style="color:var(--color-text-light);font-size:13px;">' + (e && e.message ? e.message : String(e)) + '</p>' +
+            '<button class="btn btn-outline" style="margin-top:16px;" onclick="App.Profile.showProfile()">重试</button>' +
+          '</div>' +
+        '</div>';
+    }
   }
 
   return { showProfile: showProfile };

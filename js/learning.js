@@ -62,7 +62,9 @@ App.Learning = (function () {
   async function startReview() {
     try {
       var candidates = await App.DB.getReviewCandidates(state.reviewCount);
+      console.log('[Review] 候选词数:', candidates.length, '目标数:', state.reviewCount);
       var words = App.Algorithm.selectReviewWords(candidates, state.reviewCount);
+      console.log('[Review] 选出词数:', words.length);
       if (words.length === 0) {
         App.showToast('暂无需要复习的单词，先学习一些新词吧！', 'warning');
         return;
@@ -72,6 +74,7 @@ App.Learning = (function () {
       }
       startSession('review', words);
     } catch (e) {
+      console.error('[Review] 失败:', e);
       App.showToast('加载复习单词失败: ' + e.message, 'error');
     }
   }
