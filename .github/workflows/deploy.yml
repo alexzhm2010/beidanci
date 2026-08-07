@@ -8,20 +8,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
-  group: "pages"
+  group: "pages-deploy"
   cancel-in-progress: false
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v4
@@ -41,64 +36,77 @@ jobs:
             echo "target=beta" >> $GITHUB_OUTPUT
           fi
 
-      - name: Checkout main branch (for root deploy)
+      - name: Checkout main branch
         if: steps.target.outputs.target == 'beta'
         uses: actions/checkout@v4
         with:
           ref: main
           path: main_branch
 
+      - name: Checkout gh-pages branch (preserve existing beta if any)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: ghpages_branch
+          fetch-depth: 0
+
       - name: Assemble publish directory
         run: |
+          set -e
           mkdir -p _publish
           TARGET=${{ steps.target.outputs.target }}
 
-          if [ "$TARGET" = "root" ]; then
-            # 主线: 直接部署到根路径
-            cp -r current_branch/index.html _publish/
-            [ -d current_branch/css ] && cp -r current_branch/css _publish/
-            [ -d current_branch/js ] && cp -r current_branch/js _publish/
-            [ -d current_branch/sql ] && cp -r current_branch/sql _publish/
-            [ -d current_branch/tessdata ] && cp -r current_branch/tessdata _publish/
-            # 图片等资源
-            for f in current_branch/*.jpg current_branch/*.png current_branch/*.svg current_branch/*.ico; do
-              [ -f "$f" ] && cp "$f" _publish/
+          # 复制辅助函数
+          copy_site() {
+            local src="$1"
+            local dst="$2"
+            mkdir -p "$dst"
+            [ -f "$src/index.html" ] && cp "$src/index.html" "$dst/"
+            [ -d "$src/css" ] && cp -r "$src/css" "$dst/"
+            [ -d "$src/js" ] && cp -r "$src/js" "$dst/"
+            [ -d "$src/sql" ] && cp -r "$src/sql" "$dst/"
+            [ -d "$src/tessdata" ] && cp -r "$src/tessdata" "$dst/"
+            for f in "$src"/*.jpg "$src"/*.png "$src"/*.svg "$src"/*.ico; do
+              [ -f "$f" ] && cp "$f" "$dst/"
             done
-          else
-            # Beta 分支: 拉取 main 放根目录，feature 分支放 /beta/ 子目录
-            # 1. main -> 根
-            cp -r main_branch/index.html _publish/
-            [ -d main_branch/css ] && cp -r main_branch/css _publish/
-            [ -d main_branch/js ] && cp -r main_branch/js _publish/
-            [ -d main_branch/sql ] && cp -r main_branch/sql _publish/
-            [ -d main_branch/tessdata ] && cp -r main_branch/tessdata _publish/
-            for f in main_branch/*.jpg main_branch/*.png main_branch/*.svg main_branch/*.ico; do
-              [ -f "$f" ] && cp "$f" _publish/
-            done
+          }
 
-            # 2. feature -> /beta/
-            mkdir -p _publish/beta
-            cp -r current_branch/index.html _publish/beta/
-            [ -d current_branch/css ] && cp -r current_branch/css _publish/beta/
-            [ -d current_branch/js ] && cp -r current_branch/js _publish/beta/
-            [ -d current_branch/sql ] && cp -r current_branch/sql _publish/beta/
-            [ -d current_branch/tessdata ] && cp -r current_branch/tessdata _publish/beta/
-            for f in current_branch/*.jpg current_branch/*.png current_branch/*.svg current_branch/*.ico; do
-              [ -f "$f" ] && cp "$f" _publish/beta/
-            done
+          if [ "$TARGET" = "root" ]; then
+            # === 主线: main 放根目录, 保留已有的 beta ===
+            copy_site current_branch _publish
+            # 保留之前的 beta (如果 gh-pages 上已有)
+            if [ -d "ghpages_branch/beta" ]; then
+              echo "Preserve existing /beta/"
+              cp -r ghpages_branch/beta _publish/beta
+            fi
+          else
+            # === Beta: main 放根 + 当前 feature 放 /beta/ ===
+            copy_site main_branch _publish
+            copy_site current_branch _publish/beta
+            # 把 beta 版本号写到 _publish/beta/version.txt 便于验证
+            echo "beta deployed at $(date -u +%Y-%m-%dT%H:%M:%SZ) from branch ${{ github.ref_name }}" > _publish/beta/version.txt
           fi
 
           echo "Publish directory:"
-          find _publish -maxdepth 3 -type f | head -50
+          find _publish -maxdepth 3 -type f | head -80
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Push to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: _publish
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: _publish
+          publish_branch: gh-pages
+          force_orphan: false
+          keep_files: false
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "deploy: ${{ github.ref_name }} at ${{ github.sha }}"
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Summary
+        run: |
+          echo "## 部署完成" >> $GITHUB_STEP_SUMMARY
+          echo "- 主线 (main):  https://alexzhm2010.github.io/beidanci/" >> $GITHUB_STEP_SUMMARY
+          echo "- 测试 (beta):  https://alexzhm2010.github.io/beidanci/beta/" >> $GITHUB_STEP_SUMMARY
+          echo "- 触发分支: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 提交: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
