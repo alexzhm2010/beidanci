@@ -44,6 +44,16 @@
             </div>
           </div>
           <div class="setting-group">
+            <label class="setting-label">词库级别 <span style="color:#999;font-size:12px;">(v2.0 beta · 预置词库)</span></label>
+            <div class="btn-group" id="libraryLevelGroup">
+              <button class="btn-toggle" data-level="primary" title="约 800 词">小学</button>
+              <button class="btn-toggle" data-level="junior" title="约 2000 词">初中</button>
+              <button class="btn-toggle" data-level="senior" title="约 3500 词">高中</button>
+              <button class="btn-toggle active" data-level="cet4" title="约 4500 词 · 默认">四级</button>
+            </div>
+            <div id="libraryLevelStats" style="font-size:12px;color:#888;margin-top:4px;line-height:1.6;">加载中...</div>
+          </div>
+          <div class="setting-group">
             <label class="setting-label">新词数量</label>
             <div class="btn-group" id="newCountGroup">
               <button class="btn-toggle active" data-count="20">20</button>

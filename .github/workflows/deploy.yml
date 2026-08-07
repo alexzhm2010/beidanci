@@ -1,0 +1,104 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v4
+        with:
+          path: current_branch
+          fetch-depth: 0
+
+      - name: Determine deploy target
+        id: target
+        run: |
+          cd current_branch
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "Current branch: $BRANCH"
+          if [ "$BRANCH" = "main" ]; then
+            echo "target=root" >> $GITHUB_OUTPUT
+          else
+            echo "target=beta" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout main branch (for root deploy)
+        if: steps.target.outputs.target == 'beta'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main_branch
+
+      - name: Assemble publish directory
+        run: |
+          mkdir -p _publish
+          TARGET=${{ steps.target.outputs.target }}
+
+          if [ "$TARGET" = "root" ]; then
+            # 主线: 直接部署到根路径
+            cp -r current_branch/index.html _publish/
+            [ -d current_branch/css ] && cp -r current_branch/css _publish/
+            [ -d current_branch/js ] && cp -r current_branch/js _publish/
+            [ -d current_branch/sql ] && cp -r current_branch/sql _publish/
+            [ -d current_branch/tessdata ] && cp -r current_branch/tessdata _publish/
+            # 图片等资源
+            for f in current_branch/*.jpg current_branch/*.png current_branch/*.svg current_branch/*.ico; do
+              [ -f "$f" ] && cp "$f" _publish/
+            done
+          else
+            # Beta 分支: 拉取 main 放根目录，feature 分支放 /beta/ 子目录
+            # 1. main -> 根
+            cp -r main_branch/index.html _publish/
+            [ -d main_branch/css ] && cp -r main_branch/css _publish/
+            [ -d main_branch/js ] && cp -r main_branch/js _publish/
+            [ -d main_branch/sql ] && cp -r main_branch/sql _publish/
+            [ -d main_branch/tessdata ] && cp -r main_branch/tessdata _publish/
+            for f in main_branch/*.jpg main_branch/*.png main_branch/*.svg main_branch/*.ico; do
+              [ -f "$f" ] && cp "$f" _publish/
+            done
+
+            # 2. feature -> /beta/
+            mkdir -p _publish/beta
+            cp -r current_branch/index.html _publish/beta/
+            [ -d current_branch/css ] && cp -r current_branch/css _publish/beta/
+            [ -d current_branch/js ] && cp -r current_branch/js _publish/beta/
+            [ -d current_branch/sql ] && cp -r current_branch/sql _publish/beta/
+            [ -d current_branch/tessdata ] && cp -r current_branch/tessdata _publish/beta/
+            for f in current_branch/*.jpg current_branch/*.png current_branch/*.svg current_branch/*.ico; do
+              [ -f "$f" ] && cp "$f" _publish/beta/
+            done
+          fi
+
+          echo "Publish directory:"
+          find _publish -maxdepth 3 -type f | head -50
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _publish
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

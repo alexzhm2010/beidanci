@@ -60,7 +60,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.6.0',
+  APP_VERSION: '2.0.0-beta.1',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -75,9 +75,21 @@ App.Config = {
   KEY_LAST_TAB: 'beidanci_last_tab',
   KEY_USERNAME: 'beidanci_username',
   KEY_PWD_HASH: 'beidanci_pwd_hash',
+  KEY_LIBRARY_LEVEL: 'beidanci_library_level',
 
   // 默认用户名 (内部同步码字段)
   DEFAULT_SYNC_CODE: 'default',
+
+  // 默认词库级别 (cet4=四级)
+  DEFAULT_LIBRARY_LEVEL: 'cet4',
+
+  // 预置词库级别选项
+  LIBRARY_LEVELS: [
+    { key: 'primary',  label: '小学',  desc: '约 800 词' },
+    { key: 'junior',   label: '初中',  desc: '约 2000 词' },
+    { key: 'senior',   label: '高中',  desc: '约 3500 词' },
+    { key: 'cet4',     label: '四级',  desc: '约 4500 词, 默认' },
+  ],
 
   // ========== 授权系统配置 ==========
   AUTH: {

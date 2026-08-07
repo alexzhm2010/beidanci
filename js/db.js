@@ -204,12 +204,67 @@ App.DB = (function () {
     localStorage.setItem(App.Config.KEY_SYNC_CODE, code.trim());
   }
 
+  // ========== 词库级别 ==========
+
+  function getLibraryLevel() {
+    return localStorage.getItem(App.Config.KEY_LIBRARY_LEVEL) || App.Config.DEFAULT_LIBRARY_LEVEL;
+  }
+
+  function setLibraryLevel(level) {
+    if (!level) return;
+    localStorage.setItem(App.Config.KEY_LIBRARY_LEVEL, level);
+  }
+
+  /** 获取词库学习统计 (总数/已学/待复习) */
+  async function getLibraryStats(level) {
+    var sc = getSyncCode();
+    var lv = level || getLibraryLevel();
+    try {
+      return await rpc('get_library_stats', { p_tag: lv, p_sync_code: sc });
+    } catch (e) {
+      // RPC 不可用时降级: 返回空统计
+      return { total: 0, learned: 0, due: 0, level: lv };
+    }
+  }
+
   // ========== 单词操作 ==========
 
   /** 添加或覆盖单个单词 */
   async function addWord(word) {
+    var sc = getSyncCode();
+    var src = word.source || 'custom';
+
+    // 预置词: 优先通过 RPC 保存 (仅存进度, 不重复存中文文本)
+    if (src === 'preset') {
+      try {
+        var rpcRes = await rpc('save_word_with_source', {
+          p_sync_code: sc,
+          p_word: word.word || '',
+          p_source: 'preset',
+          p_phonetic: word.phonetic || '',
+          p_part_of_speech: word.partOfSpeech || '',
+          p_chinese_meaning: word.chineseMeaning || '',
+          p_example_sentence: word.exampleSentence || '',
+          p_total_count: word.totalCount || 0,
+          p_known_count: word.knownCount || 0,
+          p_last_known_time: word.lastKnownTime || null,
+          p_last_learn_time: word.lastLearnTime || null,
+          p_stability: word.stability || 0,
+          p_next_review_at: word.nextReviewAt || 0,
+        });
+        if (rpcRes && rpcRes.id) {
+          // 合并返回的 id 到原 word
+          return Object.assign({}, word, { id: rpcRes.id, source: 'preset' });
+        }
+      } catch (e) {
+        // RPC 失败降级: 走传统 upsert
+      }
+    }
+
+    // 自定义词 / RPC 失败降级: 走传统 upsert
     var row = wordToRow(word);
-    var result = await api('POST', 'words', null, [row]);
+    row.source = src;
+    var result = await api('POST', 'words', null, [row], { upsert: true });
     return rowToWord(result[0]);
   }
 
@@ -252,6 +307,50 @@ App.DB = (function () {
   /** 获取新词 (未学习过的, 从不同位置随机抽取) */
   async function getNewWords(count) {
     var sc = getSyncCode();
+    var level = getLibraryLevel();
+
+    // ========== 优先: 从 word_library 全局词库按标签取预置词 ==========
+    try {
+      var rpcRes = await rpc('get_preset_words_by_tag', {
+        p_tag: level,
+        p_limit: count * 3,
+        p_sync_code: sc,
+      });
+      if (rpcRes && Array.isArray(rpcRes) && rpcRes.length > 0) {
+        // 过滤出真正未学过的 (totalCount == 0 或 undefined)
+        var unlearned = rpcRes.filter(function (r) {
+          return !r.totalCount || r.totalCount === 0;
+        });
+        // 如果未学过少, 也允许混入少量已学的做复习
+        var candidates = unlearned.length >= count ? unlearned : rpcRes;
+        shuffleArray(candidates);
+
+        return candidates.slice(0, count).map(function (r) {
+          return {
+            id: r.wordId || ('preset_' + r.word),
+            syncCode: sc,
+            word: r.word || '',
+            phonetic: r.phonetic || '',
+            partOfSpeech: r.partOfSpeech || '',
+            chineseMeaning: r.chineseMeaning || r.meaning || '',
+            exampleSentence: r.exampleSentence || '',
+            source: 'preset',
+            totalCount: r.totalCount || 0,
+            knownCount: r.knownCount || 0,
+            stability: r.stability || 0,
+            nextReviewAt: r.nextReviewAt || 0,
+            lastLearnTime: r.lastLearnTime || null,
+            lastKnownTime: r.lastKnownTime || null,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+        });
+      }
+    } catch (e) {
+      // RPC 不可用 (数据库未安装新脚本), 降级到旧逻辑
+    }
+
+    // ========== 降级: 从用户自己的 words 表取 (原有逻辑) ==========
     var scEnc = encodeURIComponent(sc);
     var baseFilter = 'sync_code=eq.' + scEnc + '&total_count=eq.0';
 
@@ -804,6 +903,9 @@ App.DB = (function () {
     init: init,
     getSyncCode: getSyncCode,
     setSyncCode: setSyncCode,
+    getLibraryLevel: getLibraryLevel,
+    setLibraryLevel: setLibraryLevel,
+    getLibraryStats: getLibraryStats,
     addWord: addWord,
     addWordsBatch: addWordsBatch,
     updateWord: updateWord,
