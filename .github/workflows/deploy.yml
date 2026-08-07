@@ -53,11 +53,10 @@ jobs:
 
       - name: Assemble publish directory
         run: |
-          set -e
           mkdir -p _publish
           TARGET=${{ steps.target.outputs.target }}
+          shopt -s nullglob
 
-          # 复制辅助函数
           copy_site() {
             local src="$1"
             local dst="$2"
@@ -67,24 +66,20 @@ jobs:
             [ -d "$src/js" ] && cp -r "$src/js" "$dst/"
             [ -d "$src/sql" ] && cp -r "$src/sql" "$dst/"
             [ -d "$src/tessdata" ] && cp -r "$src/tessdata" "$dst/"
-            for f in "$src"/*.jpg "$src"/*.png "$src"/*.svg "$src"/*.ico; do
-              [ -f "$f" ] && cp "$f" "$dst/"
+            for f in "$src"/*.jpg "$src"/*.png "$src"/*.svg "$src"/*.ico "$src"/*.webp; do
+              cp "$f" "$dst/"
             done
           }
 
           if [ "$TARGET" = "root" ]; then
-            # === 主线: main 放根目录, 保留已有的 beta ===
             copy_site current_branch _publish
-            # 保留之前的 beta (如果 gh-pages 上已有)
             if [ -d "ghpages_branch/beta" ]; then
               echo "Preserve existing /beta/"
               cp -r ghpages_branch/beta _publish/beta
             fi
           else
-            # === Beta: main 放根 + 当前 feature 放 /beta/ ===
             copy_site main_branch _publish
             copy_site current_branch _publish/beta
-            # 把 beta 版本号写到 _publish/beta/version.txt 便于验证
             echo "beta deployed at $(date -u +%Y-%m-%dT%H:%M:%SZ) from branch ${{ github.ref_name }}" > _publish/beta/version.txt
           fi
 
