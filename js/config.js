@@ -160,8 +160,8 @@ App.Config = {
   // 1. 在 Supabase 创建新项目 (与正式项目独立的数据库)
   // 2. 依次执行 supabase.sql + sql/preset_library.sql 建表
   // 3. 在 Settings > API 中复制 URL 和 anon key 填入下方
-  BETA_SUPABASE_URL: '',
-  BETA_SUPABASE_ANON_KEY: '',
+  BETA_SUPABASE_URL: 'https://xcljhedqvaqxofvorexu.supabase.co',
+  BETA_SUPABASE_ANON_KEY: 'sb_publishable_LW0e_50RMKFOl6TbxDkwdw_PI-iKRa6',
 };
 
 // ========== Supabase 连接配置 (根据部署路径自动切换环境) ==========
