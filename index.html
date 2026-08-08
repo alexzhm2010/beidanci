@@ -44,16 +44,6 @@
             </div>
           </div>
           <div class="setting-group">
-            <label class="setting-label">词库级别 <span style="color:#999;font-size:12px;">(v2.0 beta · 预置词库)</span></label>
-            <div class="btn-group" id="libraryLevelGroup">
-              <button class="btn-toggle" data-level="primary" title="约 800 词">小学</button>
-              <button class="btn-toggle" data-level="junior" title="约 2000 词">初中</button>
-              <button class="btn-toggle" data-level="senior" title="约 3500 词">高中</button>
-              <button class="btn-toggle active" data-level="cet4" title="约 4500 词 · 默认">四级</button>
-            </div>
-            <div id="libraryLevelStats" style="font-size:12px;color:#888;margin-top:4px;line-height:1.6;">加载中...</div>
-          </div>
-          <div class="setting-group">
             <label class="setting-label">新词数量</label>
             <div class="btn-group" id="newCountGroup">
               <button class="btn-toggle active" data-count="20">20</button>
@@ -91,23 +81,60 @@
 
       <!-- 词库模块 -->
       <section id="view-library" class="view">
+        <!-- ① 词库级别选择 -->
+        <div class="settings-panel">
+          <div class="setting-group">
+            <label class="setting-label">词库级别 <span style="color:#999;font-size:12px;">(v2.0 beta · 预置词库)</span></label>
+            <div class="btn-group" id="libraryLevelGroup">
+              <button class="btn-toggle" data-level="primary" title="约 800 词">小学</button>
+              <button class="btn-toggle" data-level="junior" title="约 2000 词">初中</button>
+              <button class="btn-toggle" data-level="senior" title="约 3500 词">高中</button>
+              <button class="btn-toggle active" data-level="cet4" title="约 4500 词 · 默认">四级</button>
+            </div>
+            <div id="libraryLevelStats" style="font-size:12px;color:#888;margin-top:4px;line-height:1.6;">加载中...</div>
+          </div>
+        </div>
+
+        <!-- ② 操作按钮 (批量导入/扫词加词/导出备份) -->
+        <div class="library-actions-panel">
+          <button class="btn btn-outline btn-action" id="btnImport">
+            <span class="action-ico">⬆</span>
+            <span class="action-text">批量导入</span>
+            <span class="action-hint">Excel 导入私人词库</span>
+          </button>
+          <button class="btn btn-outline btn-action" id="btnAddWord" style="display:none;">单个新增</button>
+          <button class="btn btn-outline btn-action" id="btnScanWord">
+            <span class="action-ico">📷</span>
+            <span class="action-text">扫词加词</span>
+            <span class="action-hint">拍照识别快速加词</span>
+          </button>
+          <button class="btn btn-outline btn-action" id="btnExport">
+            <span class="action-ico">⬇</span>
+            <span class="action-text">导出备份</span>
+            <span class="action-hint">私人词 + 学习进度</span>
+          </button>
+        </div>
+
+        <!-- ③ 搜索栏 + 单词列表 -->
         <div class="library-toolbar">
           <input type="text" id="searchInput" class="search-input" placeholder="搜索单词或中文释义...">
-          <div class="toolbar-buttons">
-            <button class="btn btn-outline" id="btnImport">批量导入</button>
-            <button class="btn btn-outline" id="btnAddWord" style="display:none;">单个新增</button>
-            <button class="btn btn-outline" id="btnScanWord">扫词加词</button>
-            <button class="btn btn-outline" id="btnExport">导出备份</button>
-          </div>
         </div>
         <div class="library-info">
           <span id="libraryWordCount">共 0 词</span>
           <span id="librarySearchInfo"></span>
+          <span id="librarySourceFilter" style="margin-left:12px;">
+            <select id="sourceFilter" style="padding:3px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg);color:var(--color-text);">
+              <option value="all">全部</option>
+              <option value="custom">仅私人词</option>
+              <option value="preset">仅预置词(已学)</option>
+            </select>
+          </span>
         </div>
         <div class="word-table-container" id="wordTableContainer">
           <table class="word-table">
             <thead>
               <tr>
+                <th style="width:80px;">来源</th>
                 <th>单词/词组</th>
                 <th>音标</th>
                 <th>中文释义</th>

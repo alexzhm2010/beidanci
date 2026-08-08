@@ -12,33 +12,10 @@ App.Learning = (function () {
   };
 
   function init() {
-    // 模式切换
+    // 模式切换 (学习模块只保留纯粹学习相关配置: 模式/新题数/复习题数/熟练度区间)
     bindToggleGroup('modeGroup', function (val) { state.mode = val; });
     bindToggleGroup('newCountGroup', function (val) { state.newWordCount = parseInt(val); });
     bindToggleGroup('reviewCountGroup', function (val) { state.reviewCount = parseInt(val); });
-
-    // ========== 词库级别切换 (v2.0 beta) ==========
-    var libGroup = document.getElementById('libraryLevelGroup');
-    if (libGroup) {
-      // 初始化选中状态
-      var initLv = App.DB.getLibraryLevel() || App.Config.DEFAULT_LIBRARY_LEVEL;
-      libGroup.querySelectorAll('.btn-toggle').forEach(function (b) {
-        if (b.dataset.level === initLv) b.classList.add('active');
-      });
-      // 绑定点击
-      libGroup.addEventListener('click', function (e) {
-        var btn = e.target.closest('.btn-toggle');
-        if (!btn) return;
-        libGroup.querySelectorAll('.btn-toggle').forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        var lv = btn.dataset.level;
-        App.DB.setLibraryLevel(lv);
-        updateLibraryLevelStats(lv);
-        App.showToast('已切换至: ' + btn.textContent + ' 词库', 'success');
-      });
-      // 初始化展示统计
-      updateLibraryLevelStats(initLv);
-    }
 
     document.getElementById('btnNewWords').addEventListener('click', startNewWords);
     document.getElementById('btnReview').addEventListener('click', startReview);
@@ -50,22 +27,6 @@ App.Learning = (function () {
       if (!btn) return;
       var range = btn.dataset.range;
       startProficiencyReview(range);
-    });
-  }
-
-  /** 更新词库级别统计展示 */
-  function updateLibraryLevelStats(level) {
-    var statsEl = document.getElementById('libraryLevelStats');
-    if (!statsEl) return;
-    statsEl.textContent = '加载中...';
-    App.DB.getLibraryStats(level).then(function (s) {
-      if (!s) { s = { total: 0, learned: 0, due: 0 }; }
-      statsEl.textContent =
-        '词库总数: ' + (s.total || 0) +
-        '  |  已学: ' + (s.learned || 0) +
-        '  |  待复习: ' + (s.due || 0);
-    }).catch(function () {
-      statsEl.textContent = '统计暂不可用 (需先执行 sql/preset_library.sql)';
     });
   }
 
