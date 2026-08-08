@@ -9,6 +9,7 @@ App.Library = (function () {
   var totalCount = 0;
   var isLoading = false;
   var hasMore = true;
+  var currentSourceFilter = 'all';      // all | custom | preset (词库页「来源筛选」下拉)
 
   // Excel表头 → 字段名 映射
   var HEADER_MAP = {
@@ -21,17 +22,46 @@ App.Library = (function () {
   };
 
   function init() {
-    // 搜索 (防抖)
+    // ========== ① 词库级别切换 (v2.0 beta, 从学习模块迁移到此) ==========
+    var libGroup = document.getElementById('libraryLevelGroup');
+    if (libGroup) {
+      var initLv = App.DB.getLibraryLevel() || App.Config.DEFAULT_LIBRARY_LEVEL;
+      libGroup.querySelectorAll('.btn-toggle').forEach(function (b) {
+        if (b.dataset.level === initLv) b.classList.add('active');
+      });
+      libGroup.addEventListener('click', function (e) {
+        var btn = e.target.closest('.btn-toggle');
+        if (!btn) return;
+        libGroup.querySelectorAll('.btn-toggle').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var lv = btn.dataset.level;
+        App.DB.setLibraryLevel(lv);
+        updateLibraryLevelStats(lv);
+        App.showToast('已切换至: ' + btn.textContent + ' 词库', 'success');
+      });
+      updateLibraryLevelStats(initLv);
+    }
+
+    // ========== ② 搜索 (防抖) ==========
     var debouncedSearch = App.Utils.debounce(function () {
       loadWords(document.getElementById('searchInput').value);
     }, 300);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
-    // 工具栏按钮
+    // ========== ③ 操作按钮 (批量导入/扫词加词/导出备份) ==========
     document.getElementById('btnImport').addEventListener('click', showImportModal);
     document.getElementById('btnAddWord').addEventListener('click', function () { showWordModal(); });
     document.getElementById('btnScanWord').addEventListener('click', showCameraScan);
     document.getElementById('btnExport').addEventListener('click', showExportModal);
+
+    // ========== ④ 来源筛选 (全部 / 仅私人词 / 仅预置词已学) ==========
+    var srcSel = document.getElementById('sourceFilter');
+    if (srcSel) {
+      srcSel.addEventListener('change', function () {
+        currentSourceFilter = srcSel.value || 'all';
+        loadWords(document.getElementById('searchInput').value);
+      });
+    }
 
     // 表格事件委托 (编辑)
     document.getElementById('wordTableBody').addEventListener('click', function (e) {
@@ -52,6 +82,22 @@ App.Library = (function () {
       var view = document.getElementById('view-library');
       if (!view || !view.classList.contains('active')) return;
       handleScroll();
+    });
+  }
+
+  /** 更新词库级别统计展示 */
+  function updateLibraryLevelStats(level) {
+    var statsEl = document.getElementById('libraryLevelStats');
+    if (!statsEl) return;
+    statsEl.textContent = '加载中...';
+    App.DB.getLibraryStats(level).then(function (s) {
+      if (!s) { s = { total: 0, learned: 0, due: 0 }; }
+      statsEl.textContent =
+        '词库总数: ' + (s.total || 0) +
+        '  |  已学: ' + (s.learned || 0) +
+        '  |  待复习: ' + (s.due || 0);
+    }).catch(function () {
+      statsEl.textContent = '统计暂不可用 (需先执行 sql/preset_library.sql)';
     });
   }
 
@@ -89,14 +135,26 @@ App.Library = (function () {
     totalCount = 0;
     hasMore = true;
     var tbody = document.getElementById('wordTableBody');
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-row">加载中...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-row">加载中...</td></tr>';
 
     isLoading = true;
     try {
       var result = await App.DB.searchWords(currentQuery, 0, App.Config.SEARCH_MAX_ROWS);
+
+      // 来源筛选: all/custom/preset (在前端本地过一遍, 避免后端改RPC时与正式环境冲突)
+      var filtered = result.words;
+      if (currentSourceFilter === 'custom') {
+        filtered = filtered.filter(function (w) { return !w.source || w.source === 'custom'; });
+      } else if (currentSourceFilter === 'preset') {
+        filtered = filtered.filter(function (w) { return w.source === 'preset'; });
+      }
+      result.words = filtered;
+      // 总数按筛选后估算 (searchWords 返回的 total 是全量, 此处改用实际筛选后的值)
+      result.total = filtered.length;
       totalCount = result.total;
       displayedCount = result.words.length;
-      hasMore = displayedCount < totalCount;
+      hasMore = false; // 本地筛选后不再支持滚动加载, 简化实现
+
       renderTable(result.words, true);
       updateInfo();
 
@@ -110,7 +168,7 @@ App.Library = (function () {
         }
       }
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-row">加载失败: ' + App.Utils.escapeHtml(e.message) + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-row">加载失败: ' + App.Utils.escapeHtml(e.message) + '</td></tr>';
       App.showToast('加载词库失败: ' + e.message, 'error');
     } finally {
       isLoading = false;
@@ -125,13 +183,19 @@ App.Library = (function () {
     var tbody = document.getElementById('wordTableBody');
     var loadingRow = document.createElement('tr');
     loadingRow.className = 'loading-row';
-    loadingRow.innerHTML = '<td colspan="5" class="empty-row">加载中...</td>';
+    loadingRow.innerHTML = '<td colspan="6" class="empty-row">加载中...</td>';
     tbody.appendChild(loadingRow);
 
     try {
       var nextOffset = displayedCount;
       var result = await App.DB.searchWords(currentQuery, nextOffset, App.Config.SEARCH_PAGE_SIZE);
-      totalCount = result.total;
+
+      // 来源筛选 (与 loadWords 保持一致)
+      if (currentSourceFilter === 'custom') {
+        result.words = result.words.filter(function (w) { return !w.source || w.source === 'custom'; });
+      } else if (currentSourceFilter === 'preset') {
+        result.words = result.words.filter(function (w) { return w.source === 'preset'; });
+      }
 
       // 移除加载指示器
       tbody.removeChild(loadingRow);
@@ -156,7 +220,10 @@ App.Library = (function () {
     var info = document.getElementById('libraryWordCount');
     var searchInfo = document.getElementById('librarySearchInfo');
     info.textContent = displayedCount + ' / ' + totalCount;
-    searchInfo.textContent = currentQuery ? '搜索: "' + currentQuery + '"' : '按熟练度排序';
+    var filterLabel = '';
+    if (currentSourceFilter === 'custom') filterLabel = ' · 仅私人词';
+    else if (currentSourceFilter === 'preset') filterLabel = ' · 仅预置词(已学)';
+    searchInfo.textContent = (currentQuery ? '搜索: "' + currentQuery + '"' : '按熟练度排序') + filterLabel;
   }
 
   function renderTable(words, isReset) {
@@ -165,7 +232,7 @@ App.Library = (function () {
 
     if (isReset) {
       if (words.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-row">暂无单词数据，点击"单个新增"或"批量导入"添加单词</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-row">暂无单词数据，点击"单个新增"或"批量导入"添加单词</td></tr>';
         return;
       }
       tbody.innerHTML = words.map(function (w) { return renderRow(w); }).join('');
@@ -179,7 +246,7 @@ App.Library = (function () {
     // 底部提示 (仅在加载过更多数据后显示)
     if (!hasMore && displayedCount > App.Config.SEARCH_MAX_ROWS) {
       var endRow = document.createElement('tr');
-      endRow.innerHTML = '<td colspan="5" class="empty-row" style="padding:20px;color:var(--color-text-lighter);">没有更多了</td>';
+      endRow.innerHTML = '<td colspan="6" class="empty-row" style="padding:20px;color:var(--color-text-lighter);">没有更多了</td>';
       tbody.appendChild(endRow);
     }
   }
@@ -191,8 +258,15 @@ App.Library = (function () {
       ? Math.round((w.knownCount / w.totalCount) * 100) + '%'
       : '-';
 
+    // 来源: 私人词(custom) / 预置词学习记录(preset)
+    var source = w.source && w.source === 'preset' ? 'preset' : 'custom';
+    var sourceLabel = source === 'preset'
+      ? '<span class="source-tag source-preset">预置词</span>'
+      : '<span class="source-tag source-custom">私人词</span>';
+
     return '' +
       '<tr data-word-id="' + esc(w.id) + '">' +
+        '<td class="col-source">' + sourceLabel + '</td>' +
         '<td class="col-word">' + esc(w.word) + '</td>' +
         '<td class="col-phonetic">' + esc(w.phonetic) + '</td>' +
         '<td class="col-meaning">' + esc(w.chineseMeaning) + '</td>' +
@@ -1127,7 +1201,12 @@ App.Library = (function () {
           '<button class="btn-toggle" data-format="csv">CSV (.csv)</button>' +
         '</div>' +
       '</div>' +
-      '<p class="form-hint">导出词库中全部单词的5个字段信息（单词/词组、音标、词性、中文释义、例句），可用于备份或恢复。</p>' +
+      '<p class="form-hint">' +
+        '导出 <b>words</b> 表中所有属于你个人的数据，共两部分：<br>' +
+        '• <b style="color:#d47b3f;">私人词</b>：自己批量导入 / 扫词 / 单个新增的单词，包含完整文本字段<br>' +
+        '• <b style="color:#2f855a;">预置词(已学)</b>：从全局预置词库中学过的单词的<b>学习进度</b>，不含官方中文释义<br>' +
+        '官方预置词库( word_library ) 不导出，换设备时直接从 Beta / 正式库再取即可。' +
+      '</p>' +
       '<div class="form-actions">' +
         '<button class="btn btn-outline" id="btnCancelExport">取消</button>' +
         '<button class="btn btn-primary" id="btnDoExport">导出</button>' +
@@ -1153,25 +1232,55 @@ App.Library = (function () {
           return;
         }
 
+        var customCount = 0;
+        var presetCount = 0;
         var data = words.map(function (w) {
+          var source = w.source && w.source === 'preset' ? 'preset' : 'custom';
+          if (source === 'preset') presetCount++; else customCount++;
           return {
+            '来源': source === 'preset' ? '预置词(已学进度)' : '私人词',
             '单词/词组': w.word || '',
             '音标': w.phonetic || '',
             '词性': w.partOfSpeech || '',
             '中文译意': w.chineseMeaning || '',
             '例句': w.exampleSentence || '',
+            '学过次数': w.totalCount || 0,
+            '记住次数': w.knownCount || 0,
+            '熟练度': w.stability || 0,
+            '下次复习时间戳(ms)': w.nextReviewAt || '',
+            '最近学习时间(ms)': w.lastLearnTime || '',
+            '最近记住时间(ms)': w.lastKnownTime || '',
           };
         });
 
         var ws = XLSX.utils.json_to_sheet(data);
+        // 列宽调整
+        ws['!cols'] = [
+          { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 10 }, { wch: 30 }, { wch: 40 },
+          { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 22 }, { wch: 20 }, { wch: 20 },
+        ];
         var wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, '词库');
+        XLSX.utils.book_append_sheet(wb, ws, '词库备份');
+
+        // 加一个说明 Sheet
+        var noteSheet = XLSX.utils.json_to_sheet([
+          { '字段': '来源=私人词', '说明': '你手动导入 / 扫词 / 单个新增的单词数据，音标、词性、中文释义、例句都完整保存在自己 words 表，可直接再导入还原' },
+          { '字段': '来源=预置词(已学进度)', '说明': '你从全局 word_library 预置词库学过的单词的学习进度记录，音标/中文释义等文本字段为空（因为存在全局共享词库，不再重复存）。再次导入时会写入 words 表恢复学习进度。' },
+          { '字段': '学过次数 / 记住次数', '说明': '学习统计，用于熟练度计算和下次复习时间预测' },
+          { '字段': '熟练度(stability)', '说明': '艾宾浩斯算法用的稳定度，越大代表这个单词记得越牢' },
+          { '字段': '下次复习时间戳(ms)', '说明': 'Unix 毫秒级时间戳，<= 当前时间即「待复习」' },
+        ]);
+        noteSheet['!cols'] = [{ wch: 28 }, { wch: 100 }];
+        XLSX.utils.book_append_sheet(wb, noteSheet, '字段说明');
 
         var filename = '词库备份_' + App.Utils.formatDate(Date.now()) + '.' + format;
         XLSX.writeFile(wb, filename, { bookType: format });
 
         App.hideModal();
-        App.showToast('已导出 ' + words.length + ' 个单词', 'success');
+        App.showToast(
+          '已导出 ' + words.length + ' 条 (私人词 ' + customCount + ' + 预置词进度 ' + presetCount + ')',
+          'success'
+        );
       } catch (e) {
         App.showToast('导出失败: ' + e.message, 'error');
       }
