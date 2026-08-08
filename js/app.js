@@ -130,7 +130,7 @@ App.Profile = (function () {
     // 普通用户 → 显示账户信息
     var authStatus = await App.Auth.checkAuth(username);
     var authInfo = await App.DB.getAuthorization(username);
-    var userAuth = await App.DB.getUserAuth(username);
+    var userAuth = await App.DB.getUserAuthInfo(username);
 
     var statusText, statusClass;
     if (authStatus === 'authorized') {
@@ -144,7 +144,7 @@ App.Profile = (function () {
         statusClass = 'success';
       }
     } else if (authStatus === 'trial') {
-      var createdDate = userAuth ? new Date(userAuth.createdAt) : new Date();
+      var createdDate = userAuth ? new Date(userAuth.created_at) : new Date();
       var trialEnd = createdDate.getTime() + App.Config.AUTH.TRIAL_DAYS * 24 * 60 * 60 * 1000;
       var trialDaysLeft = Math.ceil((trialEnd - Date.now()) / (24 * 60 * 60 * 1000));
       statusText = '试用中 (剩余' + trialDaysLeft + '天)';
@@ -157,7 +157,7 @@ App.Profile = (function () {
       statusClass = 'danger';
     }
 
-    var regDate = userAuth ? App.Utils.formatDate(new Date(userAuth.createdAt).getTime()) : '-';
+    var regDate = userAuth ? App.Utils.formatDate(new Date(userAuth.created_at).getTime()) : '-';
 
     var html =
       '<div class="profile-section">' +
@@ -166,7 +166,7 @@ App.Profile = (function () {
           '<div class="profile-row"><span class="profile-label">用户名</span><span class="profile-value">' + App.Utils.escapeHtml(username) + '</span></div>' +
           '<div class="profile-row"><span class="profile-label">注册时间</span><span class="profile-value">' + regDate + '</span></div>' +
           '<div class="profile-row"><span class="profile-label">授权状态</span><span class="profile-value ' + statusClass + '">' + statusText + '</span></div>' +
-          '<div class="profile-row"><span class="profile-label">密保问题</span><span class="profile-value">' + (userAuth ? App.Utils.escapeHtml(userAuth.secQuestion) : '-') + '</span></div>' +
+          '<div class="profile-row"><span class="profile-label">密保问题</span><span class="profile-value">' + (userAuth ? App.Utils.escapeHtml(userAuth.sec_question) : '-') + '</span></div>' +
         '</div>' +
       '</div>' +
       '<div class="profile-section">' +
