@@ -26,6 +26,8 @@ App.Library = (function () {
     var libGroup = document.getElementById('libraryLevelGroup');
     if (libGroup) {
       var initLv = App.DB.getLibraryLevel() || App.Config.DEFAULT_LIBRARY_LEVEL;
+      // 先清掉所有 active (HTML 模板里四级默认带 active, 不清就会和 localStorage 的级别冲突)
+      libGroup.querySelectorAll('.btn-toggle').forEach(function (b) { b.classList.remove('active'); });
       libGroup.querySelectorAll('.btn-toggle').forEach(function (b) {
         if (b.dataset.level === initLv) b.classList.add('active');
       });
