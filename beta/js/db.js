@@ -537,10 +537,11 @@ App.DB = (function () {
     return count;
   }
 
-  /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习 */
+  /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习
+   * 不传 limit 时默认拉取全部 (显式大 limit 避免 Supabase 默认 1000 截断) */
   async function getLearnedWords(limit) {
     var sc = getSyncCode();
-    limit = limit || 1000;
+    limit = limit || 200000;
     var params = 'sync_code=eq.' + encodeURIComponent(sc) +
       '&total_count=gt.0' +
       '&order=last_learn_time.desc' +
@@ -691,13 +692,14 @@ App.DB = (function () {
     var query = 'sync_code=eq.' + encodeURIComponent(sc);
     if (startDate) query += '&timestamp=gte.' + startDate;
     if (endDate) query += '&timestamp=lt.' + endDate;
-    var rows = await api('GET', 'records', query + '&order=timestamp.desc');
+    // 显式大 limit, 避免 Supabase 默认 1000 行截断导致旧数据丢失
+    var rows = await api('GET', 'records', query + '&order=timestamp.desc&limit=200000');
     return rows.map(rowToRecord);
   }
 
   async function getAllRecords() {
     var sc = getSyncCode();
-    var rows = await api('GET', 'records', 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc');
+    var rows = await api('GET', 'records', 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc&limit=200000');
     return rows.map(rowToRecord);
   }
 
