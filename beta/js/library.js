@@ -47,7 +47,7 @@ App.Library = (function () {
     // ========== ② 搜索 (防抖) ==========
     var debouncedSearch = App.Utils.debounce(function () {
       loadWords(document.getElementById('searchInput').value);
-    }, 300);
+    }, 800);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
     // ========== ③ 操作按钮 (批量导入/扫词加词/导出备份) ==========
