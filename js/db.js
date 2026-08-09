@@ -420,17 +420,26 @@ App.DB = (function () {
     return count;
   }
 
-  /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习 */
+  /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习
+   * 分页拉取: 每页 5000 条, 直到拿空为止, 避免任何上限截断 */
   async function getLearnedWords(limit) {
     var sc = getSyncCode();
-    limit = limit || 1000;
-    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
+    var base = 'sync_code=eq.' + encodeURIComponent(sc) +
       '&total_count=gt.0' +
-      '&order=last_learn_time.desc' +
-      '&limit=' + limit;
-    var rows = await api('GET', 'words', params);
-    if (!rows) return [];
-    return rows.map(rowToWord);
+      '&order=last_learn_time.desc';
+    var PAGE = 5000;
+    var offset = 0;
+    var all = [];
+    var hardCap = limit || Infinity;
+    while (all.length < hardCap) {
+      var take = Math.min(PAGE, hardCap - all.length);
+      var rows = await api('GET', 'words', base + '&limit=' + take + '&offset=' + offset);
+      if (!rows || rows.length === 0) break;
+      for (var i = 0; i < rows.length; i++) all.push(rowToWord(rows[i]));
+      if (rows.length < take) break;
+      offset += take;
+    }
+    return all;
   }
 
   /** 搜索单词 (空查询时按熟练度升序, 支持分页) */
@@ -594,17 +603,38 @@ App.DB = (function () {
 
   async function getRecords(startDate, endDate) {
     var sc = getSyncCode();
-    var query = 'sync_code=eq.' + encodeURIComponent(sc);
-    if (startDate) query += '&timestamp=gte.' + startDate;
-    if (endDate) query += '&timestamp=lt.' + endDate;
-    var rows = await api('GET', 'records', query + '&order=timestamp.desc');
-    return rows.map(rowToRecord);
+    var base = 'sync_code=eq.' + encodeURIComponent(sc);
+    if (startDate) base += '&timestamp=gte.' + startDate;
+    if (endDate) base += '&timestamp=lt.' + endDate;
+    base += '&order=timestamp.desc';
+    // 分页拉取: 每页 5000 条, 直到拿空为止, 不限使用年限/学习强度都不会再截断
+    var PAGE = 5000;
+    var offset = 0;
+    var all = [];
+    while (true) {
+      var rows = await api('GET', 'records', base + '&limit=' + PAGE + '&offset=' + offset);
+      if (!rows || rows.length === 0) break;
+      for (var i = 0; i < rows.length; i++) all.push(rowToRecord(rows[i]));
+      if (rows.length < PAGE) break;
+      offset += PAGE;
+    }
+    return all;
   }
 
   async function getAllRecords() {
     var sc = getSyncCode();
-    var rows = await api('GET', 'records', 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc');
-    return rows.map(rowToRecord);
+    var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc';
+    var PAGE = 5000;
+    var offset = 0;
+    var all = [];
+    while (true) {
+      var rows = await api('GET', 'records', base + '&limit=' + PAGE + '&offset=' + offset);
+      if (!rows || rows.length === 0) break;
+      for (var i = 0; i < rows.length; i++) all.push(rowToRecord(rows[i]));
+      if (rows.length < PAGE) break;
+      offset += PAGE;
+    }
+    return all;
   }
 
   // ========== 清空操作 ==========

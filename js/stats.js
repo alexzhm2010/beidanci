@@ -16,26 +16,23 @@ App.Stats = (function () {
 
   async function show() {
     try {
-      // 1. 拉取单词数据
-      // searchWords 空查询按 total_count 升序, 前500条都是新词
-      // 需要分别拉取: 新词(通过searchWords) + 已学习词(通过getLearnedWords)
-      var learnedWords = await App.DB.getLearnedWords(1000);
+      // 1. 拉取单词数据 (显式不传 limit → db.js 会用大值, 避免 1000 截断)
+      var learnedWords = await App.DB.getLearnedWords();
 
-      // 获取总数和新词数
+      // 获取精确计数: 词库总数, 已学数 (已学=learnedWords.length, 因为 total_count>0)
       var total = 0;
       try { total = await App.DB.getWordCount(); } catch (e) {}
-      var newCount = total - learnedWords.length;
-      if (newCount < 0) newCount = 0;
-
-      var words = learnedWords; // 统计主要用已学习的词
       var learned = learnedWords.length;
+      var newCount = total - learned;
+      if (newCount < 0) newCount = 0;
       var mastered = learnedWords.filter(function (w) {
         return w.totalCount && w.totalCount > 0 && w.knownCount / w.totalCount >= 0.85;
       }).length;
 
+      var words = learnedWords;
       var wordCounts = [total, newCount, learned, mastered];
 
-      // 2. 拉取学习记录 (拉取2年数据供日历和年度看板使用)
+      // 2. 拉取学习记录 (拉取2年数据供日历和年度看板使用, db.js 内部已用大 limit 避免截断)
       var records = [];
       try {
         var twoYearsAgo = Date.now() - 730 * 24 * 60 * 60 * 1000;
@@ -295,7 +292,12 @@ App.Stats = (function () {
 
     var monthTotal = monthRecords.length;
     var monthKnown = monthRecords.filter(function (r) { return r.isKnown; }).length;
-    var monthNewWords = monthRecords.filter(function (r) { return r.sessionType === 'new'; }).length;
+    // 月度「新学词」= 当月 sessionType=new 的去重单词数
+    var monthNewSet = {};
+    monthRecords.forEach(function (r) {
+      if (r.sessionType === 'new' && r.wordId) monthNewSet[r.wordId] = true;
+    });
+    var monthNewWords = Object.keys(monthNewSet).length;
     var monthAccuracy = monthTotal > 0 ? Math.round((monthKnown / monthTotal) * 100) : 0;
 
     // 活跃天数
@@ -393,11 +395,14 @@ App.Stats = (function () {
       var monthStart = new Date(y, m, 1, 0, 0, 0, 0).getTime();
       var monthEnd = new Date(y, m + 1, 1, 0, 0, 0, 0).getTime();
 
-      // 该月新学单词数 (sessionType=new 的记录数)
-      var monthNew = cachedRecords.filter(function (r) {
-        return r.timestamp >= monthStart && r.timestamp < monthEnd && r.sessionType === 'new';
-      }).length;
-      newWordCounts.push(monthNew);
+      // 该月新学单词数 = sessionType=new 的去重单词数
+      var monthNewSet = {};
+      cachedRecords.forEach(function (r) {
+        if (r.timestamp >= monthStart && r.timestamp < monthEnd && r.sessionType === 'new' && r.wordId) {
+          monthNewSet[r.wordId] = true;
+        }
+      });
+      newWordCounts.push(Object.keys(monthNewSet).length);
 
       // 该月平均熟练度 (该月有学习记录的单词的平均熟练度)
       var monthWordIds = {};

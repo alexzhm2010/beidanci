@@ -24,7 +24,7 @@ App.Library = (function () {
     // 搜索 (防抖)
     var debouncedSearch = App.Utils.debounce(function () {
       loadWords(document.getElementById('searchInput').value);
-    }, 300);
+    }, 800);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
     // 工具栏按钮
