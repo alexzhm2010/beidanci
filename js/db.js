@@ -421,13 +421,13 @@ App.DB = (function () {
   }
 
   /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习
-   * 分页拉取: 每页 5000 条, 直到拿空为止, 避免任何上限截断 */
+   * 每页 1000 条循环拉取, 兼容 Supabase max-rows 服务端硬上限 */
   async function getLearnedWords(limit) {
     var sc = getSyncCode();
     var base = 'sync_code=eq.' + encodeURIComponent(sc) +
       '&total_count=gt.0' +
       '&order=last_learn_time.desc';
-    var PAGE = 5000;
+    var PAGE = 1000;
     var offset = 0;
     var all = [];
     var hardCap = limit || Infinity;
@@ -436,6 +436,8 @@ App.DB = (function () {
       var rows = await api('GET', 'words', base + '&limit=' + take + '&offset=' + offset);
       if (!rows || rows.length === 0) break;
       for (var i = 0; i < rows.length; i++) all.push(rowToWord(rows[i]));
+      // 服务端硬上限会把任何 limit 截断到 <=1000, 所以不管返回多少,
+      // 只要恰好等于 take 就继续再查一次 offset+take, 直到拿空为止
       if (rows.length < take) break;
       offset += take;
     }
@@ -607,14 +609,16 @@ App.DB = (function () {
     if (startDate) base += '&timestamp=gte.' + startDate;
     if (endDate) base += '&timestamp=lt.' + endDate;
     base += '&order=timestamp.desc';
-    // 分页拉取: 每页 5000 条, 直到拿空为止, 不限使用年限/学习强度都不会再截断
-    var PAGE = 5000;
+    // 每页 1000 条循环拉取, 彻底兼容 Supabase max-rows 服务端硬上限 (默认1000)
+    var PAGE = 1000;
     var offset = 0;
     var all = [];
     while (true) {
       var rows = await api('GET', 'records', base + '&limit=' + PAGE + '&offset=' + offset);
       if (!rows || rows.length === 0) break;
       for (var i = 0; i < rows.length; i++) all.push(rowToRecord(rows[i]));
+      // 不到一页=拿完了; 刚好一页也会 break (服务端硬上限只会返回<=1000,
+      // 如果恰好一页, 下一轮 offset+PAGE 还会再查一次确认有无更多)
       if (rows.length < PAGE) break;
       offset += PAGE;
     }
@@ -624,7 +628,7 @@ App.DB = (function () {
   async function getAllRecords() {
     var sc = getSyncCode();
     var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc';
-    var PAGE = 5000;
+    var PAGE = 1000;
     var offset = 0;
     var all = [];
     while (true) {
