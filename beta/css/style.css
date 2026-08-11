@@ -1064,15 +1064,7 @@ input, textarea, select {
   background: linear-gradient(135deg, #ffe0b2, #ffcc80);
   border: 1px solid #e65100;
 }
-.calendar-day.learned-slim {
-  background: #f1f7ff;
-  border: 1px dashed #90caf9;
-}
-
-.day-num {
-  font-weight: 500;
-  line-height: 1;
-}
+.day-num { font-weight: 500; line-height: 1; }
 
 .day-medal {
   font-size: 16px;

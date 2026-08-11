@@ -32,7 +32,7 @@ App.Stats = (function () {
       var words = learnedWords;
       var wordCounts = [total, newCount, learned, mastered];
 
-      // 2. 拉取学习记录 (拉取2年数据供日历和年度看板使用, db.js 内部 limit=1000 分页循环, 无上限)
+      // 2. 拉取学习记录 (拉取2年数据供日历和年度看板使用, db.js 内部已用大 limit 避免截断)
       var records = [];
       try {
         var twoYearsAgo = Date.now() - 730 * 24 * 60 * 60 * 1000;
@@ -41,52 +41,22 @@ App.Stats = (function () {
         console.error('加载学习记录失败:', e);
       }
 
-      // 补偿: 从 words.lastLearnTime / lastKnownTime 推导伪 records,
-      // 避免当 records 因任何原因(服务端硬上限/历史数据遗漏)缺失时,
-      // 连续天数 / 打卡日历 / 7日活动图 漏记已学习的日期.
-      // (伪 record 只补"活跃日期"这一维度, 不计入今日学习量 / 正确率 等做题次数语义)
-      var pseudoRecords = [];
-      var seen = {};
-      words.forEach(function (w) {
-        function add(ts, sessionType, isKnown) {
-          if (!ts) return;
-          var key = w.id + '|' + sessionType + '|' + isKnown + '|' + ts;
-          if (seen[key]) return;
-          seen[key] = true;
-          pseudoRecords.push({
-            id: 'pseudo_' + key,
-            wordId: w.id,
-            word: w.word,
-            direction: 'en2cn',
-            isKnown: isKnown,
-            sessionType: sessionType,
-            timestamp: ts,
-            _pseudo: true,
-          });
-        }
-        add(w.lastLearnTime, 'review', true);
-        add(w.lastKnownTime, 'review', true);
-      });
-      var mergedRecords = records.concat(pseudoRecords);
-
       cachedWords = words;
-      // 存的是补偿后的 merged records, 供日历 / 月度 / 年度子函数通过 cachedRecords 读
-      cachedRecords = mergedRecords;
-      cachedRealRecords = records;
+      cachedRecords = records;
 
       // 初始化日历状态为当月
       var now = new Date();
       calendarState = { year: now.getFullYear(), month: now.getMonth() };
       yearlyState = { year: now.getFullYear() };
 
-      render(words, records, mergedRecords, wordCounts);
+      render(words, records, wordCounts);
     } catch (e) {
       document.getElementById('statsContent').innerHTML =
         '<div class="stats-empty"><h3>加载失败</h3><p>' + App.Utils.escapeHtml(e.message) + '</p></div>';
     }
   }
 
-  function render(words, realRecords, records, wordCounts) {
+  function render(words, records, wordCounts) {
     // 销毁旧图表
     Object.keys(charts).forEach(function (k) {
       if (charts[k]) { charts[k].destroy(); delete charts[k]; }
@@ -104,23 +74,22 @@ App.Stats = (function () {
     }
 
     // ---- 计算统计数据 ----
-    // 今日/正确率/月度总量: 只用真实 records (避免伪 records 污染做题次数语义)
     var dueNow = App.Algorithm.getDueCount(words);
     var upcoming24h = App.Algorithm.getUpcomingCount(words, 24);
 
-    // 今日 (用真实 records)
+    // 今日
     var todayStart = App.Utils.todayStart();
-    var todayRecords = realRecords.filter(function (r) { return r.timestamp >= todayStart; });
+    var todayRecords = records.filter(function (r) { return r.timestamp >= todayStart; });
     var todayCount = todayRecords.length;
     var todayKnown = todayRecords.filter(function (r) { return r.isKnown; }).length;
     var todayAccuracy = todayCount > 0 ? Math.round((todayKnown / todayCount) * 100) : 0;
 
-    // 近7天 (学习量柱图用真实 records 做量; 但连续天数/打卡有没学用 merged records)
+    // 近7天
     var days = [];
     for (var i = 6; i >= 0; i--) {
       var dStart = App.Utils.daysAgoStart(i);
       var dEnd = dStart + 86400000;
-      var dayRecs = realRecords.filter(function (r) { return r.timestamp >= dStart && r.timestamp < dEnd; });
+      var dayRecs = records.filter(function (r) { return r.timestamp >= dStart && r.timestamp < dEnd; });
       days.push({
         date: dStart,
         total: dayRecs.length,
@@ -128,7 +97,7 @@ App.Stats = (function () {
       });
     }
 
-    // 连续天数 (用 merged records: 只要 words 里有 lastLearnTime 就认这一天学过)
+    // 连续天数
     var streak = 0;
     for (var i2 = 0; i2 < 365; i2++) {
       var dStart2 = App.Utils.daysAgoStart(i2);
@@ -138,15 +107,22 @@ App.Stats = (function () {
       else if (i2 > 0) break;
     }
 
-    // 本周新词 (真实 records)
+    // 熟练度分布
+    var dist = {
+      '未学习': newCount,
+      '已学习': learned - mastered,
+      '已掌握': mastered,
+    };
+
+    // 本周新词
     var weekStart = App.Utils.daysAgoStart(6);
-    var weekNewWords = realRecords.filter(function (r) {
+    var weekNewWords = records.filter(function (r) {
       return r.timestamp >= weekStart && r.sessionType === 'new';
     }).length;
 
-    // 总体正确率 (真实 records)
-    var totalKnown = realRecords.filter(function (r) { return r.isKnown; }).length;
-    var overallAccuracy = realRecords.length > 0 ? Math.round((totalKnown / realRecords.length) * 100) : 0;
+    // 总体正确率
+    var totalKnown = records.filter(function (r) { return r.isKnown; }).length;
+    var overallAccuracy = records.length > 0 ? Math.round((totalKnown / records.length) * 100) : 0;
 
     // ---- 渲染 ----
     var html =
@@ -234,19 +210,15 @@ App.Stats = (function () {
     var daysInMonth = new Date(y, m + 1, 0).getDate();
     var firstDay = new Date(y, m, 1).getDay(); // 0=周日
 
-    // 按天统计学习记录数 (金银铜判定用真实 records, 做题条数语义)
+    // 按天统计学习记录数
     var dayCounts = {};
-    var dayHasActivity = {};  // 用 merged records: 只要 words 有 lastLearnTime 就算当天学过
     for (var d = 1; d <= daysInMonth; d++) {
       var dayStart = new Date(y, m, d, 0, 0, 0, 0).getTime();
       var dayEnd = dayStart + 86400000;
-      var count = (cachedRealRecords || cachedRecords).filter(function (r) {
+      var count = cachedRecords.filter(function (r) {
         return r.timestamp >= dayStart && r.timestamp < dayEnd;
       }).length;
       dayCounts[d] = count;
-      dayHasActivity[d] = cachedRecords.some(function (r) {
-        return r.timestamp >= dayStart && r.timestamp < dayEnd;
-      });
     }
 
     // 构建日历HTML
@@ -273,7 +245,6 @@ App.Stats = (function () {
     var today = new Date();
     for (var day = 1; day <= daysInMonth; day++) {
       var count = dayCounts[day] || 0;
-      var active = !!dayHasActivity[day];
       var isToday = (y === today.getFullYear() && m === today.getMonth() && day === today.getDate());
       var medal = '';
       var medalClass = '';
@@ -282,16 +253,11 @@ App.Stats = (function () {
       else if (count >= 150) { medal = '🥈'; medalClass = 'has-medal silver'; }
       else if (count >= 100) { medal = '🥉'; medalClass = 'has-medal bronze'; }
 
-      // 有活跃但做题数不够金银铜时 (records 截断导致 count=0), 给一个轻量的「学过」背景色提示
-      var extraClass = '';
-      if (active && count === 0) extraClass = ' learned-slim';
-
       var countDisplay = count > 0 ? count : '';
-      html += '<div class="calendar-day ' + medalClass + extraClass + (isToday ? ' today' : '') + '">' +
+      html += '<div class="calendar-day ' + medalClass + (isToday ? ' today' : '') + '">' +
         '<div class="day-num">' + day + '</div>' +
         (medal ? '<div class="day-medal">' + medal + '</div>' : '') +
         (count > 0 && !medal ? '<div class="day-count">' + count + '</div>' : '') +
-        (active && count === 0 ? '<div class="day-count" style="color:#bbb;font-size:11px;">●</div>' : '') +
       '</div>';
     }
 
@@ -320,15 +286,14 @@ App.Stats = (function () {
     var monthStart = new Date(y, m, 1, 0, 0, 0, 0).getTime();
     var monthEnd = new Date(y, m + 1, 1, 0, 0, 0, 0).getTime();
 
-    // 真实 records: 用于学习次数 / 正确率 / 新学词(去重) (伪 records 只补活跃天, 不污染做题语义)
-    var realMonth = (cachedRealRecords || cachedRecords).filter(function (r) {
+    var monthRecords = cachedRecords.filter(function (r) {
       return r.timestamp >= monthStart && r.timestamp < monthEnd;
     });
-    var monthTotal = realMonth.length;
-    var monthKnown = realMonth.filter(function (r) { return r.isKnown; }).length;
+    var monthTotal = monthRecords.length;
+    var monthKnown = monthRecords.filter(function (r) { return r.isKnown; }).length;
     // 月度「新学词」= 当月 sessionType=new 的去重单词数
     var monthNewSet = {};
-    realMonth.forEach(function (r) {
+    monthRecords.forEach(function (r) {
       if (r.sessionType === 'new' && r.wordId) monthNewSet[r.wordId] = true;
     });
     var monthNewWords = Object.keys(monthNewSet).length;
@@ -346,7 +311,7 @@ App.Stats = (function () {
       else if (c >= 100) bronzeDays++;
     }
 
-    // 当月新学单词数 (首次学习的单词)
+    // 当月新学单词数 (首次学习发生在本月的去重单词)
     var monthLearnedWords = 0;
     var monthMasteredWords = 0;
     cachedWords.forEach(function (w) {
