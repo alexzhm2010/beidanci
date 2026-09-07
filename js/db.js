@@ -163,6 +163,50 @@ App.DB = (function () {
     return 0;
   }
 
+  /**
+   * 并发分页拉取 (先用 count=exact 拿总数, 再并发拉取所有页)
+   * 相比串行 while 循环, 可将 N 页的等待时间从 N×T 降到约 ceil(N/concurrency)×T
+   * @param {string} table - 表名
+   * @param {string} base - 查询参数 (不含 limit/offset)
+   * @param {Function} rowMapper - 行转换函数 rowMapper(row) => item
+   * @param {number} [pageSize=1000] - 每页大小 (受 Supabase 硬上限 1000 约束)
+   * @param {number} [concurrency=5] - 每批并发请求数 (浏览器同域并发上限约 6)
+   * @returns {Promise<Array>} 全部数据
+   */
+  async function fetchAllPages(table, base, rowMapper, pageSize, concurrency) {
+    pageSize = pageSize || 1000;
+    concurrency = concurrency || 5;
+
+    // 1. 拉取第一页, 同时通过 count=exact 获取总数
+    var firstResp = await api('GET', table, base + '&limit=' + pageSize + '&offset=0',
+      null, { returnResponse: true, count: 'exact' });
+    var firstRows = await firstResp.json();
+    var total = extractTotalFromRange(firstResp);
+    var all = [];
+    for (var i = 0; i < firstRows.length; i++) all.push(rowMapper(firstRows[i]));
+
+    // 总数 <= 一页, 或第一页就不满, 直接返回
+    if (total <= pageSize || firstRows.length < pageSize) return all;
+
+    // 2. 计算剩余页的 offset, 分批并发拉取
+    var totalPages = Math.ceil(total / pageSize);
+    var offsets = [];
+    for (var p = 1; p < totalPages; p++) offsets.push(p * pageSize);
+
+    for (var b = 0; b < offsets.length; b += concurrency) {
+      var batch = offsets.slice(b, b + concurrency);
+      var batchResults = await Promise.all(batch.map(function (off) {
+        return api('GET', table, base + '&limit=' + pageSize + '&offset=' + off);
+      }));
+      batchResults.forEach(function (rows) {
+        if (rows) {
+          for (var j = 0; j < rows.length; j++) all.push(rowMapper(rows[j]));
+        }
+      });
+    }
+    return all;
+  }
+
   /** 分页计数 (后备方案: 当 Content-Range 不可用时使用) */
   async function countByPaging(filter) {
     var sc = getSyncCode();
@@ -427,17 +471,22 @@ App.DB = (function () {
     var base = 'sync_code=eq.' + encodeURIComponent(sc) +
       '&total_count=gt.0' +
       '&order=last_learn_time.desc';
+
+    // 无上限: 走并发分页 (统计页/熟练度复习等全量场景)
+    if (!limit) {
+      return await fetchAllPages('words', base, rowToWord);
+    }
+
+    // 有上限: 串行拉取前 N 条 (提前结束, 无需拉全部)
     var PAGE = 1000;
     var offset = 0;
     var all = [];
-    var hardCap = limit || Infinity;
+    var hardCap = limit;
     while (all.length < hardCap) {
       var take = Math.min(PAGE, hardCap - all.length);
       var rows = await api('GET', 'words', base + '&limit=' + take + '&offset=' + offset);
       if (!rows || rows.length === 0) break;
       for (var i = 0; i < rows.length; i++) all.push(rowToWord(rows[i]));
-      // 服务端硬上限会把任何 limit 截断到 <=1000, 所以不管返回多少,
-      // 只要恰好等于 take 就继续再查一次 offset+take, 直到拿空为止
       if (rows.length < take) break;
       offset += take;
     }
@@ -609,36 +658,14 @@ App.DB = (function () {
     if (startDate) base += '&timestamp=gte.' + startDate;
     if (endDate) base += '&timestamp=lt.' + endDate;
     base += '&order=timestamp.desc';
-    // 每页 1000 条循环拉取, 彻底兼容 Supabase max-rows 服务端硬上限 (默认1000)
-    var PAGE = 1000;
-    var offset = 0;
-    var all = [];
-    while (true) {
-      var rows = await api('GET', 'records', base + '&limit=' + PAGE + '&offset=' + offset);
-      if (!rows || rows.length === 0) break;
-      for (var i = 0; i < rows.length; i++) all.push(rowToRecord(rows[i]));
-      // 不到一页=拿完了; 刚好一页也会 break (服务端硬上限只会返回<=1000,
-      // 如果恰好一页, 下一轮 offset+PAGE 还会再查一次确认有无更多)
-      if (rows.length < PAGE) break;
-      offset += PAGE;
-    }
-    return all;
+    // 并发分页拉取 (每页1000, 每批5个并发)
+    return await fetchAllPages('records', base, rowToRecord);
   }
 
   async function getAllRecords() {
     var sc = getSyncCode();
     var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc';
-    var PAGE = 1000;
-    var offset = 0;
-    var all = [];
-    while (true) {
-      var rows = await api('GET', 'records', base + '&limit=' + PAGE + '&offset=' + offset);
-      if (!rows || rows.length === 0) break;
-      for (var i = 0; i < rows.length; i++) all.push(rowToRecord(rows[i]));
-      if (rows.length < PAGE) break;
-      offset += PAGE;
-    }
-    return all;
+    return await fetchAllPages('records', base, rowToRecord);
   }
 
   // ========== 清空操作 ==========

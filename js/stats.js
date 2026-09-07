@@ -16,12 +16,25 @@ App.Stats = (function () {
 
   async function show() {
     try {
-      // 1. 拉取单词数据 (显式不传 limit → db.js 会用大值, 避免 1000 截断)
-      var learnedWords = await App.DB.getLearnedWords();
+      // 初始化日历状态为当月
+      var now = new Date();
+      calendarState = { year: now.getFullYear(), month: now.getMonth() };
+      yearlyState = { year: now.getFullYear() };
 
-      // 获取精确计数: 词库总数, 已学数 (已学=learnedWords.length, 因为 total_count>0)
-      var total = 0;
-      try { total = await App.DB.getWordCount(); } catch (e) {}
+      // 并行拉取: 单词数据 + 词库总数 + 当年学习记录 (三者无依赖, 并行减少等待)
+      // 记录只拉取当年1月1日至今 (日历/近7天/月度/年度看板都只用到当年数据, 相比2年数据量减半)
+      var yearStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0).getTime();
+
+      var results = await Promise.all([
+        App.DB.getLearnedWords(),
+        App.DB.getWordCount().catch(function () { return 0; }),
+        App.DB.getRecords(yearStart).catch(function (e) { console.error('加载学习记录失败:', e); return []; }),
+      ]);
+
+      var learnedWords = results[0];
+      var total = results[1] || 0;
+      var records = results[2] || [];
+
       var learned = learnedWords.length;
       var newCount = total - learned;
       if (newCount < 0) newCount = 0;
@@ -32,22 +45,8 @@ App.Stats = (function () {
       var words = learnedWords;
       var wordCounts = [total, newCount, learned, mastered];
 
-      // 2. 拉取学习记录 (拉取2年数据供日历和年度看板使用, db.js 内部已用大 limit 避免截断)
-      var records = [];
-      try {
-        var twoYearsAgo = Date.now() - 730 * 24 * 60 * 60 * 1000;
-        records = await App.DB.getRecords(twoYearsAgo);
-      } catch (e) {
-        console.error('加载学习记录失败:', e);
-      }
-
       cachedWords = words;
       cachedRecords = records;
-
-      // 初始化日历状态为当月
-      var now = new Date();
-      calendarState = { year: now.getFullYear(), month: now.getMonth() };
-      yearlyState = { year: now.getFullYear() };
 
       render(words, records, wordCounts);
     } catch (e) {
