@@ -85,8 +85,8 @@ App.Learning = (function () {
       var minP = parseInt(parts[0]) / 100;
       var maxP = parseInt(parts[1]) / 100;
 
-      // 拉取已学习的单词 (不能用searchWords, 它按total_count升序只返回新词)
-      var allWords = await App.DB.getLearnedWords(1000);
+      // 拉取已学习的单词 (不传limit, 获取全部已学词, 与统计页面熟练度分布口径一致)
+      var allWords = await App.DB.getLearnedWords();
 
       // 筛选指定熟练度区间的单词 (排除未学习的)
       var filtered = allWords.filter(function (w) {
