@@ -60,7 +60,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.7.3',
+  APP_VERSION: '1.7.4',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -86,6 +86,13 @@ App.Config = {
     APP_SALT: 'bx_word_2026_salt_k3y',// 密码哈希加盐（仅用于本地哈希计算，即使暴露也无法单独解密密码）
     WECHAT_ID: '',                    // 捐赠联系微信 (稍后填写)
     WECHAT_QR: '',                    // 微信收款码图片路径 (稍后填写)
+  },
+
+  // PAYJS 在线支付配置
+  PAYJS: {
+    // create-pay-order Edge Function 的 URL, 留空则只显示微信收款码(人工开通)
+    // 部署后填入: https://<project-ref>.supabase.co/functions/v1/create-pay-order
+    CREATE_ORDER_URL: '',
   },
 
   // 密保问题选项

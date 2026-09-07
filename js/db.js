@@ -839,6 +839,11 @@ App.DB = (function () {
     };
   }
 
+  /** 查询支付订单状态 (前端轮询用) */
+  async function getPayOrderStatus(outTradeNo) {
+    return await rpc('get_pay_order_status', { p_out_trade_no: outTradeNo });
+  }
+
   /** 获取未读留言 */
   async function getUnreadMessages(username) {
     // 先获取已读留言ID
@@ -903,6 +908,7 @@ App.DB = (function () {
     changeSecQuestion: changeSecQuestion,
     getAuthorization: getAuthorization,
     getPromoConfig: getPromoConfig,
+    getPayOrderStatus: getPayOrderStatus,
     getUnreadMessages: getUnreadMessages,
     markMessageRead: markMessageRead,
   };

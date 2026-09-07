@@ -276,26 +276,133 @@ App.Auth = (function () {
   }
 
   function _renderDonationPage(username, promo) {
-    var qrHtml;
-    if (AUTH.WECHAT_QR) qrHtml = '<img src="' + _esc(AUTH.WECHAT_QR) + '" alt="微信收款码" style="width:200px;height:200px;border-radius:8px;border:1px solid #E0E0E0;display:block;margin:0 auto;">';
-    else qrHtml = '<div style="width:200px;height:200px;border:2px dashed #ccc;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#999;font-size:13px;text-align:center;margin:0 auto;padding:20px;box-sizing:border-box;">微信收款码<br>待配置</div>';
     var promoText = (promo && promo.text) ? promo.text : '捐赠20元得1年使用权';
-    var contactHtml = AUTH.WECHAT_ID ? '<p style="font-size:14px;color:#666;margin-top:14px;">捐赠后请联系微信: <b style="color:#333;">' + _esc(AUTH.WECHAT_ID) + '</b></p>' : '';
+    var onlinePayBtn = '';
+    // 配置了 PAYJS Edge Function 时显示在线支付按钮
+    if (App.Config.PAYJS && App.Config.PAYJS.CREATE_ORDER_URL) {
+      onlinePayBtn = '<button id="btnOnlinePay" style="width:100%;padding:12px;background:#07C160;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:500;cursor:pointer;margin-bottom:12px;">在线支付 (微信)</button>';
+    }
+
+    var qrHtml;
+    if (AUTH.WECHAT_QR) qrHtml = '<img src="' + _esc(AUTH.WECHAT_QR) + '" alt="微信收款码" style="width:180px;height:180px;border-radius:8px;border:1px solid #E0E0E0;display:block;margin:0 auto;">';
+    else qrHtml = '';
+
+    var contactHtml = AUTH.WECHAT_ID ? '<p style="font-size:13px;color:#666;margin-top:10px;">或联系微信: <b style="color:#333;">' + _esc(AUTH.WECHAT_ID) + '</b> 手动开通</p>' : '';
+    var manualHtml = qrHtml ? (qrHtml + contactHtml) : (AUTH.WECHAT_ID ? contactHtml : '');
+
     var html =
       '<div class="auth-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,#4A90D9,#357ABD);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;box-sizing:border-box;overflow-y:auto;"> ' +
         '<div class="auth-card" style="background:#fff;border-radius:12px;padding:32px 24px;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.2);text-align:center;"> ' +
           '<h2 style="font-size:22px;color:#333;margin-bottom:6px;">支持背单词</h2>' +
           '<p style="font-size:13px;color:#999;margin-bottom:18px;">当前账户: ' + _esc(username) + '</p>' +
-          '<p style="font-size:15px;color:#333;margin-bottom:16px;font-weight:500;">' + _esc(promoText) + '</p>' +
-          qrHtml + contactHtml +
-          '<p style="font-size:13px;color:#999;margin-top:16px;line-height:1.6;">捐赠后请联系管理员开通授权<br>开通后点击下方刷新按钮</p>' +
-          '<button id="btnRefreshAuth" style="width:100%;padding:12px;background:#4A90D9;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:500;cursor:pointer;margin-top:20px;">刷新</button>' +
+          '<p style="font-size:15px;color:#333;margin-bottom:20px;font-weight:500;">' + _esc(promoText) + '</p>' +
+          onlinePayBtn +
+          (manualHtml ? '<div id="manualPaySection" style="' + (onlinePayBtn ? 'margin-top:8px;padding-top:16px;border-top:1px dashed #E0E0E0;' : '') + '">' +
+            '<p style="font-size:12px;color:#999;margin-bottom:10px;">其他支付方式</p>' + manualHtml + '</div>' : '') +
+          '<button id="btnRefreshAuth" style="width:100%;padding:12px;background:#4A90D9;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:500;cursor:pointer;margin-top:20px;">刷新授权</button>' +
           '<button id="btnDonationLogout" style="width:100%;padding:10px;background:transparent;color:#999;border:none;font-size:14px;cursor:pointer;margin-top:8px;">退出登录</button>' +
         '</div>' +
       '</div>';
     _showOverlay(html);
+    var btnOnlinePay = document.getElementById('btnOnlinePay');
+    if (btnOnlinePay) btnOnlinePay.addEventListener('click', function () { _startOnlinePay(username, promo); });
     document.getElementById('btnRefreshAuth').addEventListener('click', _refreshAuth);
     document.getElementById('btnDonationLogout').addEventListener('click', logout);
+  }
+
+  /** 在线支付: 创建订单 -> 显示二维码 -> 轮询状态 -> 自动开通 */
+  async function _startOnlinePay(username, promo) {
+    var amount = (promo && promo.amount) ? promo.amount : '20';
+    var promoText = (promo && promo.text) ? promo.text : '捐赠' + amount + '元得1年使用权';
+
+    // 1. 显示加载状态
+    _showOverlay(
+      '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,#4A90D9,#357ABD);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;box-sizing:border-box;">' +
+        '<div style="background:#fff;border-radius:12px;padding:32px 24px;width:100%;max-width:340px;text-align:center;">' +
+          '<p style="font-size:15px;color:#666;">正在创建订单...</p>' +
+        '</div>' +
+      '</div>'
+    );
+
+    try {
+      // 2. 调用 Edge Function 创建订单
+      var resp = await fetch(App.Config.PAYJS.CREATE_ORDER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username }),
+      });
+      var data = await resp.json();
+      if (!data.success) throw new Error(data.error || '创建订单失败');
+
+      var outTradeNo = data.out_trade_no;
+      var qrcode = data.qrcode;
+      var priceYuan = (data.total_fee / 100).toFixed(2);
+
+      // 3. 显示二维码
+      _showPayQrCode(username, outTradeNo, qrcode, priceYuan, promoText);
+
+      // 4. 轮询订单状态 (每3秒一次, 最多轮询15分钟)
+      _pollOrderStatus(outTradeNo, username);
+    } catch (e) {
+      App.showToast('创建订单失败: ' + e.message, 'error');
+      showDonationPage();
+    }
+  }
+
+  /** 显示支付二维码 */
+  function _showPayQrCode(username, outTradeNo, qrcode, priceYuan, promoText) {
+    var html =
+      '<div class="auth-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,#4A90D9,#357ABD);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;box-sizing:border-box;overflow-y:auto;">' +
+        '<div style="background:#fff;border-radius:12px;padding:32px 24px;width:100%;max-width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.2);text-align:center;">' +
+          '<h2 style="font-size:22px;color:#333;margin-bottom:6px;">微信扫码支付</h2>' +
+          '<p style="font-size:13px;color:#999;margin-bottom:16px;">' + _esc(promoText) + '</p>' +
+          '<div style="font-size:36px;font-weight:bold;color:#07C160;margin-bottom:16px;">¥' + priceYuan + '</div>' +
+          '<div id="payQrContainer" style="width:220px;height:220px;margin:0 auto;border:1px solid #E0E0E0;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;">' +
+            '<img id="payQrImg" src="' + _esc(qrcode) + '" alt="支付二维码" style="width:100%;height:100%;object-fit:contain;" onerror="document.getElementById(\'payQrContainer\').innerHTML=\'<div style=\\\'color:#999;font-size:13px;\\\'>二维码加载失败</div>\'">' +
+          '</div>' +
+          '<p id="payStatusTip" style="font-size:14px;color:#666;margin-top:16px;">请使用微信扫描二维码支付</p>' +
+          '<p style="font-size:12px;color:#999;margin-top:8px;">支付成功后将自动开通授权</p>' +
+          '<button id="btnPayCancel" style="width:100%;padding:10px;background:transparent;color:#999;border:none;font-size:14px;cursor:pointer;margin-top:16px;">取消支付</button>' +
+        '</div>' +
+      '</div>';
+    _showOverlay(html);
+    document.getElementById('btnPayCancel').addEventListener('click', function () {
+      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+      showDonationPage();
+    });
+  }
+
+  var _pollTimer = null;
+  var _pollCount = 0;
+
+  /** 轮询订单状态 */
+  function _pollOrderStatus(outTradeNo, username) {
+    if (_pollTimer) clearInterval(_pollTimer);
+    _pollCount = 0;
+    var maxPolls = 300; // 3秒 * 300 = 15分钟
+    _pollTimer = setInterval(async function () {
+      _pollCount++;
+      if (_pollCount > maxPolls) {
+        if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+        var tip = document.getElementById('payStatusTip');
+        if (tip) { tip.textContent = '支付超时，请重新发起支付'; tip.style.color = '#E74C3C'; }
+        return;
+      }
+      try {
+        var result = await App.DB.getPayOrderStatus(outTradeNo);
+        if (result && result.success && result.status === 'paid') {
+          if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+          var tip2 = document.getElementById('payStatusTip');
+          if (tip2) { tip2.textContent = '支付成功，正在开通授权...'; tip2.style.color = '#27AE60'; }
+          // 支付成功, 刷新授权进入应用
+          setTimeout(function () {
+            _refreshAuth();
+          }, 1000);
+        }
+      } catch (e) {
+        // 轮询出错不中断, 继续尝试
+      }
+    }, 3000);
   }
 
   async function _refreshAuth() {
@@ -308,7 +415,7 @@ App.Auth = (function () {
       if (status === 'authorized' || status === 'admin' || status === 'trial') { App.showToast('授权有效, 即将进入应用', 'success'); _hideOverlay(); _startApp(); showMessagesPopup(username); }
       else App.showToast('授权尚未开通, 请捐赠后联系管理员', 'error');
     } catch (e) { App.showToast('检查失败: ' + e.message, 'error'); }
-    finally { if (btn) { btn.disabled = false; btn.textContent = '刷新'; } }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '刷新授权'; } }
   }
 
   async function showMessagesPopup(username) {
