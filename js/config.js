@@ -60,7 +60,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.7.4',
+  APP_VERSION: '1.7.5',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -91,8 +91,7 @@ App.Config = {
   // PAYJS 在线支付配置
   PAYJS: {
     // create-pay-order Edge Function 的 URL, 留空则只显示微信收款码(人工开通)
-    // 部署后填入: https://<project-ref>.supabase.co/functions/v1/create-pay-order
-    CREATE_ORDER_URL: '',
+    CREATE_ORDER_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/create-pay-order',
   },
 
   // 密保问题选项
