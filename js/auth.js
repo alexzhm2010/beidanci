@@ -278,8 +278,8 @@ App.Auth = (function () {
   function _renderDonationPage(username, promo) {
     var promoText = (promo && promo.text) ? promo.text : '捐赠20元得1年使用权';
     var onlinePayBtn = '';
-    // 配置了 PAYJS Edge Function 时显示在线支付按钮
-    if (App.Config.PAYJS && App.Config.PAYJS.CREATE_ORDER_URL) {
+    // 配置了 YunGouOS Edge Function 时显示在线支付按钮
+    if (App.Config.YUNGOU && App.Config.YUNGOU.CREATE_ORDER_URL) {
       onlinePayBtn = '<button id="btnOnlinePay" style="width:100%;padding:12px;background:#07C160;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:500;cursor:pointer;margin-bottom:12px;">在线支付 (微信)</button>';
     }
 
@@ -326,7 +326,7 @@ App.Auth = (function () {
 
     try {
       // 2. 调用 Edge Function 创建订单
-      var resp = await fetch(App.Config.PAYJS.CREATE_ORDER_URL, {
+      var resp = await fetch(App.Config.YUNGOU.CREATE_ORDER_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username }),
