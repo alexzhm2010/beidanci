@@ -206,16 +206,16 @@ App.Auth = (function () {
     finally { btn.disabled = false; btn.textContent = '验证'; }
   }
 
-  function _forgotStep3(username) {
+  function _forgotStep3(username, secAnswerHash) {
     var body =
       '<div class="form-group"><label>新密码</label><input type="password" id="forgotNewPwd" placeholder="请输入新密码"></div>' +
       '<div class="form-group"><label>确认新密码</label><input type="password" id="forgotNewPwd2" placeholder="再次输入新密码"></div>' +
       '<div class="form-actions"><button class="btn btn-primary" id="btnForgotReset">重置密码</button></div>';
     _showAuthCard('找回密码 (3/3)', '设置新密码', body);
-    document.getElementById('btnForgotReset').addEventListener('click', function () { _forgotStep3Reset(username); });
+    document.getElementById('btnForgotReset').addEventListener('click', function () { _forgotStep3Reset(username, secAnswerHash); });
   }
 
-  async function _forgotStep3Reset(username) {
+  async function _forgotStep3Reset(username, secAnswerHash) {
     var pwd = document.getElementById('forgotNewPwd').value;
     var pwd2 = document.getElementById('forgotNewPwd2').value;
     if (!pwd) { App.showToast('请输入新密码', 'error'); return; }
@@ -223,7 +223,7 @@ App.Auth = (function () {
     var btn = document.getElementById('btnForgotReset'); btn.disabled = true; btn.textContent = '重置中...';
     try {
       var pwdHash = await hashPassword(username, pwd);
-      await App.DB.updatePassword(username, pwdHash);
+      await App.DB.resetPassword(username, pwdHash, secAnswerHash);
       App.showToast('密码重置成功, 请重新登录', 'success'); showLoginPage();
     } catch (e) { App.showToast('重置失败: ' + e.message, 'error'); }
     finally { btn.disabled = false; btn.textContent = '重置密码'; }
