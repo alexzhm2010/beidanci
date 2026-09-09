@@ -133,25 +133,8 @@ App.Admin = (function () {
       });
     }
 
-    // tab 切换
-    var tabBtns = container.querySelectorAll('.admin-tab-btn');
-    tabBtns.forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var t = btn.getAttribute('data-tab');
-        currentTab = t;
-        // 更新 active 态
-        tabBtns.forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        renderTabContent(t);
-        localStorage.setItem(App.Config.KEY_LAST_TAB, t);
-      });
-    });
-
-    // 设置当前 tab active
-    tabBtns.forEach(function (btn) {
-      btn.classList.toggle('active', btn.getAttribute('data-tab') === currentTab);
-    });
-
+    // v1.10.0: tab 切换由顶部 .app-nav 统一处理 (App.switchTab → Admin.show)
+    // 这里只渲染当前 tab 内容, 不再画冗余的 .admin-tabs
     renderTabContent(currentTab);
   }
 
@@ -169,13 +152,6 @@ App.Admin = (function () {
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
         '<span style="font-size:14px;color:var(--color-text-light);">当前管理员: <b>' + App.Utils.escapeHtml(adminName) + '</b></span>' +
         '<button class="btn btn-danger btn-sm" id="btnAdminLogout">退出登录</button>' +
-      '</div>' +
-      // v1.10.0 admin tab 栏
-      '<div class="admin-tabs" style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--color-border);">' +
-        '<button class="btn admin-tab-btn" data-tab="dashboard" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">看板</button>' +
-        '<button class="btn admin-tab-btn" data-tab="wordbook" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">词库</button>' +
-        '<button class="btn admin-tab-btn" data-tab="users" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">用户</button>' +
-        '<button class="btn admin-tab-btn" data-tab="settings" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">设置</button>' +
       '</div>' +
       '<div id="adminTabContent"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>'
     );
