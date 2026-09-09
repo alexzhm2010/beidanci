@@ -52,16 +52,10 @@ App.Learning = (function () {
     var grid = document.getElementById('letterGrid');
     if (!grid) return;
     try {
-      // 双数据源, 与统计页完全对齐口径:
-      //   - allWords (getAllWords): 全部词, 用于"总数量" (含新词, 与统计页"单词总数"一致)
-      //   - learnedWords (getLearnedWords): 已学习词, 用于 mastered/unmastered
-      //     (与统计页饼图"已学习未掌握"完全同源, 避免串行分页丢词导致的口径偏差)
-      var results = await Promise.all([
-        App.DB.getAllWords(),
-        App.DB.getLearnedWords(),
-      ]);
-      var allWords = results[0];
-      var learnedWords = results[1];
+      // 单一数据源: getLearnedWords (与统计页饼图同源, fetchAllPages 并发分页可靠)
+      // total/mastered/unmastered 全部来自同一份词列表, 保证 total = mastered + unmastered,
+      // 彻底避免双数据源丢词不一致导致 占比为负 等问题
+      var learnedWords = await App.DB.getLearnedWords();
 
       // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词
       var stats = { '#': { total: 0, mastered: 0, unmastered: 0 } };
@@ -69,21 +63,15 @@ App.Learning = (function () {
         stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
       }
 
-      // 1. 总数量: 来自全部词 (含新词), 与统计页"单词总数"一致
-      allWords.forEach(function (w) {
-        if (!w.word) return;
-        var letter = w.word.charAt(0).toUpperCase();
-        var key = stats[letter] ? letter : '#';
-        stats[key].total++;
-      });
-
-      // 2. 已掌握 / 未掌握: 来自已学习词 (totalCount>0), 与统计页饼图同源
-      //    - mastered   = 熟练度 >= 80%
-      //    - unmastered = 已学习但熟练度 < 80% (对应饼图"已学习未掌握", 不含新词)
+      // 一次遍历同时统计 total / mastered / unmastered
+      //   - total       = 该字母开头的已学习词数
+      //   - mastered    = 熟练度 >= 80%
+      //   - unmastered  = 熟练度 < 80% (对应统计页饼图"已学习未掌握")
       learnedWords.forEach(function (w) {
         if (!w.word) return;
         var letter = w.word.charAt(0).toUpperCase();
         var key = stats[letter] ? letter : '#';
+        stats[key].total++;
         if (w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
         else stats[key].unmastered++;
       });
@@ -92,20 +80,20 @@ App.Learning = (function () {
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
       if (stats['#'].total > 0) keys.push('#');
 
-      // 颜色渐变: 按"未掌握占比" (total-mastered)/total 做 min-max 归一化
+      // 颜色渐变: 按"未掌握占比" unmastered/total 做 min-max 归一化
       // 保证无论数据分布如何, 占比最高的字母=红(0°), 最低的=绿(120°), 拉开区分度
       var ratios = [];
       keys.forEach(function (k) {
         var s = stats[k];
-        if (s.total > 0) ratios.push((s.total - s.mastered) / s.total);
+        if (s.total > 0) ratios.push(s.unmastered / s.total);
       });
       var rMin = ratios.length ? Math.min.apply(null, ratios) : 0;
       var rMax = ratios.length ? Math.max.apply(null, ratios) : 0;
       var rRange = rMax - rMin;
 
-      function hueFor(total, mastered) {
+      function hueFor(unmastered, total) {
         if (total === 0) return 120;
-        var r = (total - mastered) / total;
+        var r = unmastered / total;
         var norm = rRange > 0 ? (r - rMin) / rRange : 0; // 0=最好, 1=最差
         return (1 - norm) * 120; // 最差->0°红, 最好->120°绿
       }
@@ -119,9 +107,9 @@ App.Learning = (function () {
         if (s.total === 0) {
           cls += ' is-empty';
         } else {
-          var hue = hueFor(s.total, s.mastered);
+          var hue = hueFor(s.unmastered, s.total);
           style = ' style="background:hsl(' + hue + ',75%,90%);border-color:hsl(' + hue + ',70%,50%);"';
-          var pct = Math.round(((s.total - s.mastered) / s.total) * 100);
+          var pct = Math.round((s.unmastered / s.total) * 100);
           pctText = ' <span class="letter-pct">(' + pct + '%)</span>';
         }
         html +=
