@@ -474,10 +474,8 @@ App.Auth = (function () {
     var btn = document.getElementById('btnChgPwdSubmit'); btn.disabled = true; btn.textContent = '修改中...';
     try {
       var oldHash = await hashPassword(username, oldPwd);
-      var user = await App.DB.getUserAuth(username);
-      if (!user || user.passwordHash !== oldHash) { App.showToast('原密码错误', 'error'); return; }
       var newHash = await hashPassword(username, newPwd);
-      await App.DB.updatePassword(username, newHash);
+      await App.DB.changePassword(username, oldHash, newHash);
       localStorage.setItem(CFG.KEY_PWD_HASH, newHash);
       App.showToast('密码修改成功', 'success'); App.hideModal();
     } catch (e) { App.showToast('修改失败: ' + e.message, 'error'); }
@@ -504,11 +502,9 @@ App.Auth = (function () {
     var btn = document.getElementById('btnChgSecSubmit'); btn.disabled = true; btn.textContent = '修改中...';
     try {
       var pwdHash = await hashPassword(username, pwd);
-      var user = await App.DB.getUserAuth(username);
-      if (!user || user.passwordHash !== pwdHash) { App.showToast('密码错误', 'error'); return; }
       var secAnswerHash = await App.Utils.sha256(secAnswer.toLowerCase());
       var secQuestion = CFG.SEC_QUESTIONS[secQIdx];
-      await App.DB.updateSecQuestion(username, secQuestion, secAnswerHash);
+      await App.DB.changeSecQuestion(username, pwdHash, secQuestion, secAnswerHash);
       App.showToast('密保问题修改成功', 'success'); App.hideModal();
     } catch (e) { App.showToast('修改失败: ' + e.message, 'error'); }
     finally { btn.disabled = false; btn.textContent = '确认修改'; }
