@@ -490,31 +490,14 @@ App.DB = (function () {
     limit = limit || App.Config.SEARCH_MAX_ROWS;
 
     if (!q) {
-      // 空查询: 用 Prefer: count=exact 获取真实总数, 再拉取数据供前端排序
+      // 空查询: 拉取全部单词, 前端按熟练度升序排序后分页
+      // (原 FETCH_BATCH=500 只拉 total_count 最小的 500 条, 会遗漏熟练度
+      //  最低的词, 导致排序结果不正确)
       var sc = getSyncCode();
-      var FETCH_BATCH = 500;
+      var base = 'sync_code=eq.' + encodeURIComponent(sc);
+      var words = await fetchAllPages('words', base, rowToWord);
 
-      // 1. 获取真实总数 (Content-Range + 后备分页计数)
-      var total = 0;
-      try {
-        var countResp = await api('GET', 'words',
-          'sync_code=eq.' + encodeURIComponent(sc) + '&limit=1',
-          null, { returnResponse: true, count: 'exact' });
-        total = extractTotalFromRange(countResp);
-      } catch (e) {}
-      if (!total) {
-        total = await countByPaging('');
-      }
-
-      // 2. 拉取部分数据供前端排序 (最多 500 条)
-      var params = 'sync_code=eq.' + encodeURIComponent(sc) +
-        '&order=total_count.asc.nullsfirst,created_at.asc' +
-        '&limit=' + FETCH_BATCH;
-      var rows = await api('GET', 'words', params);
-      if (!rows) return { words: [], total: total };
-
-      // 3. 前端按熟练度精细排序
-      var words = rows.map(rowToWord);
+      // 前端按熟练度升序 (从低到高), 熟练度相同按创建时间升序
       words.sort(function (a, b) {
         var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
         var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
@@ -522,40 +505,20 @@ App.DB = (function () {
         return (a.createdAt || 0) - (b.createdAt || 0);
       });
 
-      // 4. 分页切片
+      var total = words.length;
       var sliced = words.slice(offset, offset + limit);
       return { words: sliced, total: total };
     }
 
-    // 有查询: 用 PostgREST or + ilike 在数据库层过滤, 避免全量拉取
-    // (原实现 getAllWords() 会把整个词库拉到前端再 filter, 词库一大就慢)
+    // 有查询: 用 PostgREST or + ilike 在数据库层过滤, 并发分页拉全部匹配词
     var sc = getSyncCode();
     var qEnc = encodeURIComponent(q);
     // * 是 PostgREST ilike 的通配符; 同时匹配 word 和 chinese_meaning
     var orFilter = 'or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
+    var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&' + orFilter;
 
-    // 1. 获取匹配总数 (Prefer: count=exact)
-    var total = 0;
-    try {
-      var countResp = await api('GET', 'words',
-        'sync_code=eq.' + encodeURIComponent(sc) + '&' + orFilter + '&limit=1',
-        null, { returnResponse: true, count: 'exact' });
-      total = extractTotalFromRange(countResp);
-    } catch (e) {}
-    if (!total) return { words: [], total: 0 };
-
-    // 2. 拉取匹配数据 (上限 500, 供前端熟练度精细排序)
-    //    注: PostgREST 无法按 known_count/total_count 比值排序, 故前端再排一次
-    var FETCH_MAX = 500;
-    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
-      '&' + orFilter +
-      '&order=total_count.asc.nullsfirst,created_at.asc' +
-      '&limit=' + FETCH_MAX;
-    var rows = await api('GET', 'words', params);
-    if (!rows) return { words: [], total: total };
-
-    // 3. 前端按熟练度精细排序 (与空查询分支保持一致)
-    var words = rows.map(rowToWord);
+    // 拉取全部匹配词 (并发分页), 前端按熟练度升序排序后分页
+    var words = await fetchAllPages('words', base, rowToWord);
     words.sort(function (a, b) {
       var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
       var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
@@ -563,7 +526,7 @@ App.DB = (function () {
       return (a.createdAt || 0) - (b.createdAt || 0);
     });
 
-    // 4. 分页切片
+    var total = words.length;
     return { words: words.slice(offset, offset + limit), total: total };
   }
 
