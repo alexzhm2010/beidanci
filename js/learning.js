@@ -54,35 +54,44 @@ App.Learning = (function () {
     try {
       var allWords = await App.DB.getAllWords();
 
-      // 26 个字母初始化 (A-Z)
-      var stats = {};
+      // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词, 保证总数与统计页一致
+      var stats = { '#': { total: 0, mastered: 0, unmastered: 0 } };
       for (var i = 0; i < 26; i++) {
-        stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0 };
+        stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
       }
 
-      // 按首字母分组, 统计总数量与已掌握数
+      // 按首字母分组, 统计: 总数量 / 已掌握 / 未掌握
+      // 口径与统计页饼图保持一致:
+      //   - total       = 该字母开头的全部单词数 (对应统计页"单词总数")
+      //   - mastered    = 熟练度 >= 80% 的已学习词 (对应统计页"已掌握")
+      //   - unmastered  = 已学习但未达到 80% 的词 (对应统计页饼图"已学习未掌握", 不含新词)
       allWords.forEach(function (w) {
         if (!w.word) return;
         var letter = w.word.charAt(0).toUpperCase();
-        if (!stats[letter]) return; // 非 A-Z 开头跳过
-        stats[letter].total++;
-        if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) {
-          stats[letter].mastered++;
+        var key = stats[letter] ? letter : '#';
+        stats[key].total++;
+        if (w.totalCount > 0) {
+          if (w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
+          else stats[key].unmastered++;
         }
       });
 
+      // 渲染顺序: A-Z, 最后追加"#其他" (仅当存在非 A-Z 词时)
+      var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
+      var other = stats['#'];
+      if (other.total > 0) keys.push('#');
+
       var html = '';
-      Object.keys(stats).forEach(function (ch) {
+      keys.forEach(function (ch) {
         var s = stats[ch];
-        var unmastered = s.total - s.mastered;
         var cls = 'letter-block';
         if (s.total === 0) cls += ' is-empty';
-        else if (unmastered === 0) cls += ' is-done';
+        else if (s.unmastered === 0) cls += ' is-done';
         else if (s.total > 0 && s.mastered / s.total < 0.5) cls += ' is-low';
         html +=
           '<div class="' + cls + '">' +
             '<div class="letter-head">' + ch + '</div>' +
-            '<div class="letter-count">' + unmastered + '/' + s.total + '</div>' +
+            '<div class="letter-count">' + s.unmastered + '/' + s.total + '</div>' +
           '</div>';
       });
       grid.innerHTML = html;
