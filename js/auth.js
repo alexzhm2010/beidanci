@@ -3,7 +3,9 @@
  *
  * v1.9.0 变更:
  *   - 普通用户登录改走 Supabase Auth REST (假邮箱 username@beidanci.local + bcrypt)
- *   - 老用户首次登录自动迁移 (verify_login 兜底校验 → migrate-user Edge Function → signIn)
+ *   - 注册/老用户迁移统一走 migrate-user Edge Function
+ *     (admin API 建账号时 email_confirm=true, 不依赖 Dashboard "Confirm email" 开关)
+ *   - 老用户首次登录自动迁移 (verify_login 兜底校验 → migrate-user → signIn)
  *   - 会话由 access_token/refresh_token/uid 三元组管理 (RLS 强隔离核心)
  *   - 改密/找回密码走 update-password Edge Function (同步更新 bcrypt + 旧 SHA-256 哈希)
  *   - admin 保留旧机制 (verify_login + KEY_PWD_HASH), 不进 Supabase Auth
@@ -62,35 +64,6 @@ App.Auth = (function () {
   function _authErrMsg(data, fallback) {
     if (!data) return fallback;
     return data.error_description || data.msg || data.message || data.error || data.code || fallback;
-  }
-
-  /**
-   * Supabase Auth 注册
-   * @returns {Promise<{user: object, session: object|null}>}
-   *   - 项目关闭邮箱确认 → session 有值 (直接登录)
-   *   - 项目开启邮箱确认 → session 为 null (需再 signIn)
-   */
-  async function _authSignUp(email, password) {
-    var resp = await fetch(
-      App.DBConfig.getUrl().replace(/\/+$/, '') + '/auth/v1/signup',
-      {
-        method: 'POST',
-        headers: {
-          'apikey': App.DBConfig.getKey(),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email: email, password: password }),
-      }
-    );
-    var data = null;
-    try { data = await resp.json(); } catch (e) { data = null; }
-    if (!resp.ok) {
-      throw new Error(_authErrMsg(data, '注册失败 (HTTP ' + resp.status + ')'));
-    }
-    return {
-      user: data.user || data,
-      session: data.session || null,
-    };
   }
 
   /**
@@ -225,11 +198,15 @@ App.Auth = (function () {
   }
 
   /**
-   * v1.9.0 注册流程:
-   *   1. user_auth 查重 (RPC, 防止建出无法登录的 Auth 账号)
-   *   2. Supabase Auth signUp (假邮箱 + 明文密码 → bcrypt)
-   *   3. register_user RPC 存密保 + 绑 user_id (失败用 link_user_id 兜底)
-   *   4. 存会话 (signUp 返回 session 直接用; 否则再 signIn 拿 JWT)
+   * v1.9.0 注册流程 (不依赖 Dashboard "Confirm email" 开关):
+   *   1. user_auth 查重 (RPC)
+   *   2. register_user RPC: 存入 user_auth (密保 + 旧哈希, user_id 先留空)
+   *   3. migrate-user Edge Function:
+   *      - verify_login 用旧哈希校验 (刚注册, 必然通过)
+   *      - admin API 建 Auth 账号, email_confirm=true (service_role 强制确认, 绕过 Dashboard 开关)
+   *      - 回填 user_auth / words / records 的 user_id
+   *   4. Supabase Auth signIn 拿 JWT (账号已确认, 必然成功)
+   *   5. 存会话
    */
   async function _handleRegister() {
     var username = document.getElementById('regUsername').value.trim();
@@ -249,39 +226,24 @@ App.Auth = (function () {
       var exists = await App.DB.usernameExists(username);
       if (exists) { App.showToast('用户名已存在', 'error'); return; }
 
-      // 2. Supabase Auth signUp
-      var email = _fakeEmail(username);
-      var signUpResult = await _authSignUp(email, password);
-      var uid = (signUpResult.user && (signUpResult.user.id || signUpResult.user.ID)) || null;
-      if (!uid) throw new Error('注册失败: 未获取到用户 ID');
-
-      // 3. register_user RPC (存密保 + 绑 user_id, 失败用 link_user_id 兜底重试)
+      // 2. 写入 user_auth (密保 + 旧哈希, user_id 留空, 等 migrate-user 回填)
       var pwdHash = await hashPassword(username, password);
       var secAnswerHash = await App.Utils.sha256(secAnswer.toLowerCase());
       var secQuestion = CFG.SEC_QUESTIONS[secQIdx];
-      try {
-        await App.DB.registerUser(username, pwdHash, secQuestion, secAnswerHash, uid);
-      } catch (regErr) {
-        // signUp 已建 Auth 账号, user_auth 写入失败 → 尝试补绑 user_id
-        try { await App.DB.linkUserId(username, uid); } catch (_) {}
-        // link 也失败的话不阻塞, 后续仍可登录 (migrate-user 会再校验回填)
+      await App.DB.registerUser(username, pwdHash, secQuestion, secAnswerHash, null);
+
+      // 3. migrate-user: verify_login 校验 → admin API 建已确认 Auth 账号 → 回填 user_id
+      var migResult = await App.DB.migrateUser(username, password, pwdHash);
+      if (!migResult || !migResult.success) {
+        throw new Error((migResult && migResult.error) || '注册失败: 建账号失败');
       }
 
-      // 4. 建立会话
-      if (signUpResult.session && signUpResult.session.access_token) {
-        App.DB.setAuthSession(uid, signUpResult.session.access_token, signUpResult.session.refresh_token);
-      } else {
-        // 项目开启了邮箱确认 → signUp 不返回 session → 再 signIn 拿 JWT
-        try {
-          var session = await _authSignIn(email, password);
-          App.DB.setAuthSession(session.user.id, session.access_token, session.refresh_token);
-        } catch (signInErr) {
-          // signIn 失败 (邮箱未确认等): 提示用户用密码登录
-          App.showToast('注册成功, 请登录', 'success');
-          showLoginPage();
-          return;
-        }
-      }
+      // 4. signIn 拿 JWT (账号已通过 admin API 确认, 不再依赖 Dashboard 邮箱确认开关)
+      var email = _fakeEmail(username);
+      var session = await _authSignIn(email, password);
+
+      // 5. 存会话
+      App.DB.setAuthSession(session.user.id, session.access_token, session.refresh_token);
       localStorage.setItem(CFG.KEY_USERNAME, username);
       localStorage.setItem(CFG.KEY_PWD_HASH, pwdHash);
       App.DB.setSyncCode(username);
@@ -289,8 +251,8 @@ App.Auth = (function () {
       await _afterLoginSuccess(username);
     } catch (e) {
       var msg = e && e.message ? e.message : String(e);
-      // Supabase Auth "User already registered" → 用户名已存在
-      if (msg.indexOf('already registered') >= 0 || msg.indexOf('already been registered') >= 0 || msg.indexOf('User already') >= 0) {
+      // Auth 账号已存在或用户名已存在
+      if (msg.indexOf('already') >= 0 || msg.indexOf('exists') >= 0) {
         App.showToast('用户名已存在', 'error');
       } else {
         App.showToast('注册失败: ' + msg, 'error');
