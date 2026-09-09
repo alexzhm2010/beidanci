@@ -156,7 +156,7 @@ BEGIN
   RETURN jsonb_build_object(
     'success', true,
     'words', COALESCE((
-      SELECT json_agg(t) FROM (
+      SELECT jsonb_agg(t) FROM (
         SELECT id, word, phonetic, part_of_speech, chinese_meaning,
                example_sentence, stage, stage_order, created_at, updated_at
         FROM preset_words
@@ -336,7 +336,7 @@ BEGIN
   RETURN jsonb_build_object(
     'success', true,
     'stats', COALESCE((
-      SELECT json_agg(t) FROM (
+      SELECT jsonb_agg(t) FROM (
         SELECT stage, stage_order, COUNT(*) AS count
         FROM preset_words
         GROUP BY stage, stage_order
