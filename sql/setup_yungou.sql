@@ -1,11 +1,19 @@
 -- ============================================
 -- YunGouOS (云购支付) 集成 - 数据库脚本
 -- 使用方法: 在 Supabase SQL Editor 中执行
+-- 说明: 本脚本可重复执行 (幂等), 不会因重复运行而报错
 -- ============================================
 
--- 1. 如果已存在 PAYJS 版本的 pay_orders 表, 先做字段迁移
-ALTER TABLE IF EXISTS pay_orders RENAME COLUMN payjs_order_id TO order_no;
-ALTER TABLE IF EXISTS pay_orders ALTER COLUMN total_fee TYPE INTEGER USING total_fee::INTEGER;
+-- 1. 字段迁移: payjs_order_id -> order_no (仅当旧字段存在时执行)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'pay_orders' AND column_name = 'payjs_order_id'
+  ) THEN
+    ALTER TABLE pay_orders RENAME COLUMN payjs_order_id TO order_no;
+  END IF;
+END $$;
 
 -- 2. 支付订单表 (如不存在则创建)
 CREATE TABLE IF NOT EXISTS pay_orders (
@@ -24,7 +32,10 @@ CREATE INDEX IF NOT EXISTS idx_pay_orders_username ON pay_orders(username);
 CREATE INDEX IF NOT EXISTS idx_pay_orders_status ON pay_orders(status);
 
 -- 3. 支付回调专用授权函数 (无需管理员密码, 验证订单后自动开通)
-CREATE OR REPLACE FUNCTION pay_authorize_user(
+--    注意: 旧版参数名为 p_payjs_order_id, PostgreSQL 不允许
+--    CREATE OR REPLACE 更改参数名, 必须先 DROP 再 CREATE
+DROP FUNCTION IF EXISTS pay_authorize_user(TEXT, TEXT);
+CREATE FUNCTION pay_authorize_user(
   p_out_trade_no TEXT,
   p_order_no TEXT
 ) RETURNS JSON AS $$
