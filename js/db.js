@@ -276,21 +276,11 @@ App.DB = (function () {
     return rowToWord(rows[0]);
   }
 
-  /** 获取当前用户名下所有单词 (分页拉取, 每页 1000) */
+  /** 获取当前用户名下所有单词 (并发分页, 与 getLearnedWords 同机制, 避免丢词) */
   async function getAllWords() {
     var sc = getSyncCode();
     var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=created_at.asc';
-    var PAGE = 1000;
-    var all = [];
-    var offset = 0;
-    while (true) {
-      var rows = await api('GET', 'words', base + '&limit=' + PAGE + '&offset=' + offset);
-      if (!rows || rows.length === 0) break;
-      all = all.concat(rows);
-      if (rows.length < PAGE) break;
-      offset += PAGE;
-    }
-    return all.map(rowToWord);
+    return await fetchAllPages('words', base, rowToWord);
   }
 
   /** 获取新词 (未学习过的, 从不同位置随机抽取) */
