@@ -52,34 +52,45 @@ App.Learning = (function () {
     var grid = document.getElementById('letterGrid');
     if (!grid) return;
     try {
-      var allWords = await App.DB.getAllWords();
+      // 双数据源, 与统计页完全对齐口径:
+      //   - allWords (getAllWords): 全部词, 用于"总数量" (含新词, 与统计页"单词总数"一致)
+      //   - learnedWords (getLearnedWords): 已学习词, 用于 mastered/unmastered
+      //     (与统计页饼图"已学习未掌握"完全同源, 避免串行分页丢词导致的口径偏差)
+      var results = await Promise.all([
+        App.DB.getAllWords(),
+        App.DB.getLearnedWords(),
+      ]);
+      var allWords = results[0];
+      var learnedWords = results[1];
 
-      // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词, 保证总数与统计页一致
+      // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词
       var stats = { '#': { total: 0, mastered: 0, unmastered: 0 } };
       for (var i = 0; i < 26; i++) {
         stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
       }
 
-      // 按首字母分组, 统计: 总数量 / 已掌握 / 未掌握
-      // 口径与统计页饼图保持一致:
-      //   - total       = 该字母开头的全部单词数 (对应统计页"单词总数")
-      //   - mastered    = 熟练度 >= 80% 的已学习词 (对应统计页"已掌握")
-      //   - unmastered  = 已学习但未达到 80% 的词 (对应统计页饼图"已学习未掌握", 不含新词)
+      // 1. 总数量: 来自全部词 (含新词), 与统计页"单词总数"一致
       allWords.forEach(function (w) {
         if (!w.word) return;
         var letter = w.word.charAt(0).toUpperCase();
         var key = stats[letter] ? letter : '#';
         stats[key].total++;
-        if (w.totalCount > 0) {
-          if (w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
-          else stats[key].unmastered++;
-        }
+      });
+
+      // 2. 已掌握 / 未掌握: 来自已学习词 (totalCount>0), 与统计页饼图同源
+      //    - mastered   = 熟练度 >= 80%
+      //    - unmastered = 已学习但熟练度 < 80% (对应饼图"已学习未掌握", 不含新词)
+      learnedWords.forEach(function (w) {
+        if (!w.word) return;
+        var letter = w.word.charAt(0).toUpperCase();
+        var key = stats[letter] ? letter : '#';
+        if (w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
+        else stats[key].unmastered++;
       });
 
       // 渲染顺序: A-Z, 最后追加"#其他" (仅当存在非 A-Z 词时)
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
-      var other = stats['#'];
-      if (other.total > 0) keys.push('#');
+      if (stats['#'].total > 0) keys.push('#');
 
       var html = '';
       keys.forEach(function (ch) {
