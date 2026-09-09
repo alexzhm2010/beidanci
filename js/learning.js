@@ -92,19 +92,22 @@ App.Learning = (function () {
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
       if (stats['#'].total > 0) keys.push('#');
 
-      // 颜色渐变: 按"未掌握占比" (未掌握+未学习新词) / 总数量, 0=全绿, 1=全红
-      // HSL: 红=0°, 绿=120°, 按占比线性插值色相
-      function ratioColor(total, mastered) {
-        if (total === 0) return null;
-        var ratio = (total - mastered) / total; // 0..1, 越大越差
-        var hue = (1 - ratio) * 120;            // 0%掌握->0°红, 100%掌握->120°绿
-        return 'hsl(' + hue + ', 70%, 88%)';   // 浅色背景
-      }
-      function ratioBorder(total, mastered) {
-        if (total === 0) return null;
-        var ratio = (total - mastered) / total;
-        var hue = (1 - ratio) * 120;
-        return 'hsl(' + hue + ', 65%, 52%)';   // 较深边框, 突出色阶
+      // 颜色渐变: 按"未掌握占比" (total-mastered)/total 做 min-max 归一化
+      // 保证无论数据分布如何, 占比最高的字母=红(0°), 最低的=绿(120°), 拉开区分度
+      var ratios = [];
+      keys.forEach(function (k) {
+        var s = stats[k];
+        if (s.total > 0) ratios.push((s.total - s.mastered) / s.total);
+      });
+      var rMin = ratios.length ? Math.min.apply(null, ratios) : 0;
+      var rMax = ratios.length ? Math.max.apply(null, ratios) : 0;
+      var rRange = rMax - rMin;
+
+      function hueFor(total, mastered) {
+        if (total === 0) return 120;
+        var r = (total - mastered) / total;
+        var norm = rRange > 0 ? (r - rMin) / rRange : 0; // 0=最好, 1=最差
+        return (1 - norm) * 120; // 最差->0°红, 最好->120°绿
       }
 
       var html = '';
@@ -115,9 +118,8 @@ App.Learning = (function () {
         if (s.total === 0) {
           cls += ' is-empty';
         } else {
-          var bg = ratioColor(s.total, s.mastered);
-          var bd = ratioBorder(s.total, s.mastered);
-          if (bg && bd) style = ' style="background:' + bg + ';border-color:' + bd + ';"';
+          var hue = hueFor(s.total, s.mastered);
+          style = ' style="background:hsl(' + hue + ',75%,90%);border-color:hsl(' + hue + ',70%,50%);"';
         }
         html +=
           '<div class="' + cls + '"' + style + '>' +
