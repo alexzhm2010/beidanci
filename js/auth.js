@@ -1,5 +1,13 @@
 /**
- * 用户认证 & 授权模块
+ * 用户认证 & 授权模块 (v1.9.0 安全加固版)
+ *
+ * v1.9.0 变更:
+ *   - 普通用户登录改走 Supabase Auth REST (假邮箱 username@beidanci.local + bcrypt)
+ *   - 老用户首次登录自动迁移 (verify_login 兜底校验 → migrate-user Edge Function → signIn)
+ *   - 会话由 access_token/refresh_token/uid 三元组管理 (RLS 强隔离核心)
+ *   - 改密/找回密码走 update-password Edge Function (同步更新 bcrypt + 旧 SHA-256 哈希)
+ *   - admin 保留旧机制 (verify_login + KEY_PWD_HASH), 不进 Supabase Auth
+ *
  * 功能: 登录/注册/找回密码、授权检查、捐赠引导、管理员留言
  */
 window.App = window.App || {};
@@ -43,10 +51,83 @@ App.Auth = (function () {
     _showOverlay(html);
   }
 
+  // ========== v1.9.0: Supabase Auth REST 调用 (手动 fetch, 不引入 SDK) ==========
+
+  /** 假邮箱拼接: 用户名 → username@beidanci.local (不发真实邮件, 仅作 Auth 唯一键) */
+  function _fakeEmail(username) {
+    return username + '@' + AUTH.EMAIL_DOMAIN;
+  }
+
+  /** 提取 Supabase Auth 错误信息 (兼容新旧版本响应格式) */
+  function _authErrMsg(data, fallback) {
+    if (!data) return fallback;
+    return data.error_description || data.msg || data.message || data.error || data.code || fallback;
+  }
+
+  /**
+   * Supabase Auth 注册
+   * @returns {Promise<{user: object, session: object|null}>}
+   *   - 项目关闭邮箱确认 → session 有值 (直接登录)
+   *   - 项目开启邮箱确认 → session 为 null (需再 signIn)
+   */
+  async function _authSignUp(email, password) {
+    var resp = await fetch(
+      App.DBConfig.getUrl().replace(/\/+$/, '') + '/auth/v1/signup',
+      {
+        method: 'POST',
+        headers: {
+          'apikey': App.DBConfig.getKey(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: email, password: password }),
+      }
+    );
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok) {
+      throw new Error(_authErrMsg(data, '注册失败 (HTTP ' + resp.status + ')'));
+    }
+    return {
+      user: data.user || data,
+      session: data.session || null,
+    };
+  }
+
+  /**
+   * Supabase Auth 密码登录 → 拿 access_token/refresh_token/uid
+   * @returns {Promise<{access_token, refresh_token, user, expires_in}>}
+   */
+  async function _authSignIn(email, password) {
+    var resp = await fetch(
+      App.DBConfig.getUrl().replace(/\/+$/, '') + '/auth/v1/token?grant_type=password',
+      {
+        method: 'POST',
+        headers: {
+          'apikey': App.DBConfig.getKey(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: email, password: password }),
+      }
+    );
+    var data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok) {
+      // 常见错误: Invalid credentials / Email not confirmed
+      throw new Error(_authErrMsg(data, '登录失败 (HTTP ' + resp.status + ')'));
+    }
+    if (!data || !data.access_token) {
+      throw new Error('登录响应缺少 access_token');
+    }
+    return data;
+  }
+
+  // ========== 会话存储 ==========
+
   function _clearAuthStorage() {
     localStorage.removeItem(CFG.KEY_USERNAME);
     localStorage.removeItem(CFG.KEY_PWD_HASH);
     localStorage.removeItem(CFG.KEY_SYNC_CODE);
+    if (App.DB && typeof App.DB.clearAuthSession === 'function') App.DB.clearAuthSession();
   }
 
   function _startApp() {
@@ -64,20 +145,32 @@ App.Auth = (function () {
     }
   }
 
+  // ========== 初始化: 本地会话恢复 ==========
+
   async function init() {
     if (isLoggedIn()) {
       var username = localStorage.getItem(CFG.KEY_USERNAME);
-      var pwdHash = localStorage.getItem(CFG.KEY_PWD_HASH);
       try {
-        var result = await App.DB.verifyLogin(username, pwdHash);
-        if (result.success) { await _afterLoginSuccess(username); return; }
-      } catch (e) { console.error('[Auth] init 验证失败:', e); }
+        // admin: 旧机制恢复 (无 JWT, 用 verify_login 校验 KEY_PWD_HASH)
+        if (username === AUTH.ADMIN_CODE) {
+          var adminPwdHash = localStorage.getItem(CFG.KEY_PWD_HASH);
+          var adminResult = await App.DB.verifyLogin(username, adminPwdHash);
+          if (adminResult.success) { await _afterLoginSuccess(username); return; }
+        } else if (App.DB.getUserId() && App.DB.getAccessToken()) {
+          // 普通用户: 本地有 JWT → 直接进应用
+          // (access_token 过期时由 db.js 在 401 时自动用 refresh_token 刷新, 无需在此校验)
+          await _afterLoginSuccess(username);
+          return;
+        }
+      } catch (e) { console.error('[Auth] init 会话恢复失败:', e); }
       _clearAuthStorage();
     }
     showLoginPage();
   }
 
   function hashPassword(username, password) { return App.Utils.sha256(username + password + AUTH.APP_SALT); }
+
+  // ========== 登录页 UI ==========
 
   function showLoginPage() {
     var html =
@@ -114,6 +207,8 @@ App.Auth = (function () {
     finally { btn.disabled = false; btn.textContent = '登录'; }
   }
 
+  // ========== 注册页 UI ==========
+
   function showRegisterPage() {
     var options = '';
     for (var i = 0; i < CFG.SEC_QUESTIONS.length; i++) options += '<option value="' + i + '">' + _esc(CFG.SEC_QUESTIONS[i]) + '</option>';
@@ -129,6 +224,13 @@ App.Auth = (function () {
     document.getElementById('btnRegSubmit').addEventListener('click', _handleRegister);
   }
 
+  /**
+   * v1.9.0 注册流程:
+   *   1. user_auth 查重 (RPC, 防止建出无法登录的 Auth 账号)
+   *   2. Supabase Auth signUp (假邮箱 + 明文密码 → bcrypt)
+   *   3. register_user RPC 存密保 + 绑 user_id (失败用 link_user_id 兜底)
+   *   4. 存会话 (signUp 返回 session 直接用; 否则再 signIn 拿 JWT)
+   */
   async function _handleRegister() {
     var username = document.getElementById('regUsername').value.trim();
     var password = document.getElementById('regPassword').value;
@@ -139,26 +241,64 @@ App.Auth = (function () {
     if (!password) { App.showToast('请输入密码', 'error'); return; }
     if (password !== password2) { App.showToast('两次密码不一致', 'error'); return; }
     if (!secAnswer) { App.showToast('请输入密保答案', 'error'); return; }
-    if (username === AUTH.ADMIN_CODE) {
-      try { var adminExists = await App.DB.usernameExists(AUTH.ADMIN_CODE); if (adminExists) { App.showToast('该用户名已被保留', 'error'); return; } }
-      catch (e) { App.showToast('验证失败: ' + e.message, 'error'); return; }
-    }
+    if (username === AUTH.ADMIN_CODE) { App.showToast('该用户名已被保留', 'error'); return; }
+
     var btn = document.getElementById('btnRegSubmit'); btn.disabled = true; btn.textContent = '注册中...';
     try {
+      // 1. user_auth 查重
       var exists = await App.DB.usernameExists(username);
       if (exists) { App.showToast('用户名已存在', 'error'); return; }
+
+      // 2. Supabase Auth signUp
+      var email = _fakeEmail(username);
+      var signUpResult = await _authSignUp(email, password);
+      var uid = (signUpResult.user && (signUpResult.user.id || signUpResult.user.ID)) || null;
+      if (!uid) throw new Error('注册失败: 未获取到用户 ID');
+
+      // 3. register_user RPC (存密保 + 绑 user_id, 失败用 link_user_id 兜底重试)
       var pwdHash = await hashPassword(username, password);
       var secAnswerHash = await App.Utils.sha256(secAnswer.toLowerCase());
       var secQuestion = CFG.SEC_QUESTIONS[secQIdx];
-      await App.DB.registerUser(username, pwdHash, secQuestion, secAnswerHash);
+      try {
+        await App.DB.registerUser(username, pwdHash, secQuestion, secAnswerHash, uid);
+      } catch (regErr) {
+        // signUp 已建 Auth 账号, user_auth 写入失败 → 尝试补绑 user_id
+        try { await App.DB.linkUserId(username, uid); } catch (_) {}
+        // link 也失败的话不阻塞, 后续仍可登录 (migrate-user 会再校验回填)
+      }
+
+      // 4. 建立会话
+      if (signUpResult.session && signUpResult.session.access_token) {
+        App.DB.setAuthSession(uid, signUpResult.session.access_token, signUpResult.session.refresh_token);
+      } else {
+        // 项目开启了邮箱确认 → signUp 不返回 session → 再 signIn 拿 JWT
+        try {
+          var session = await _authSignIn(email, password);
+          App.DB.setAuthSession(session.user.id, session.access_token, session.refresh_token);
+        } catch (signInErr) {
+          // signIn 失败 (邮箱未确认等): 提示用户用密码登录
+          App.showToast('注册成功, 请登录', 'success');
+          showLoginPage();
+          return;
+        }
+      }
       localStorage.setItem(CFG.KEY_USERNAME, username);
       localStorage.setItem(CFG.KEY_PWD_HASH, pwdHash);
       App.DB.setSyncCode(username);
       App.showToast('注册成功, 欢迎使用!', 'success');
       await _afterLoginSuccess(username);
-    } catch (e) { App.showToast('注册失败: ' + e.message, 'error'); }
-    finally { btn.disabled = false; btn.textContent = '注册'; }
+    } catch (e) {
+      var msg = e && e.message ? e.message : String(e);
+      // Supabase Auth "User already registered" → 用户名已存在
+      if (msg.indexOf('already registered') >= 0 || msg.indexOf('already been registered') >= 0 || msg.indexOf('User already') >= 0) {
+        App.showToast('用户名已存在', 'error');
+      } else {
+        App.showToast('注册失败: ' + msg, 'error');
+      }
+    } finally { btn.disabled = false; btn.textContent = '注册'; }
   }
+
+  // ========== 找回密码 UI (密保兜底) ==========
 
   function showForgotPasswordPage() { _forgotStep1(); }
 
@@ -215,6 +355,7 @@ App.Auth = (function () {
     document.getElementById('btnForgotReset').addEventListener('click', function () { _forgotStep3Reset(username, secAnswerHash); });
   }
 
+  /** v1.9.0: 走 update-password Edge Function (verify_type=sec_answer, 同步改 bcrypt + 旧哈希) */
   async function _forgotStep3Reset(username, secAnswerHash) {
     var pwd = document.getElementById('forgotNewPwd').value;
     var pwd2 = document.getElementById('forgotNewPwd2').value;
@@ -222,28 +363,72 @@ App.Auth = (function () {
     if (pwd !== pwd2) { App.showToast('两次密码不一致', 'error'); return; }
     var btn = document.getElementById('btnForgotReset'); btn.disabled = true; btn.textContent = '重置中...';
     try {
-      var pwdHash = await hashPassword(username, pwd);
-      await App.DB.resetPassword(username, pwdHash, secAnswerHash);
+      var newPwdHash = await hashPassword(username, pwd);
+      await App.DB.resetPassword(username, pwd, newPwdHash, secAnswerHash);
       App.showToast('密码重置成功, 请重新登录', 'success'); showLoginPage();
     } catch (e) { App.showToast('重置失败: ' + e.message, 'error'); }
     finally { btn.disabled = false; btn.textContent = '重置密码'; }
   }
 
+  // ========== 登录逻辑 (v1.9.0: Supabase Auth + 自动迁移) ==========
+
+  /**
+   * v1.9.0 登录流程:
+   *   admin  → verify_login (旧机制, 不进 Auth)
+   *   普通用户:
+   *     1. verify_login 旧哈希校验 (防劫持 + 兼容老用户)
+   *     2. getMigrationStatus 查迁移状态
+   *        - 未迁移 → migrate-user Edge Function (校验旧哈希 → 建 Auth 账号 → 回填 user_id)
+   *     3. Supabase Auth signIn 拿 JWT (access_token/refresh_token/uid)
+   *     4. 存会话 + 旧哈希兜底
+   */
   async function login(username, password) {
     if (!username || !password) { App.showToast('请输入用户名和密码', 'error'); return false; }
     try {
       var pwdHash = await hashPassword(username, password);
-      var result = await App.DB.verifyLogin(username, pwdHash);
-      if (!result.success) { App.showToast(result.error === 'user_not_found' ? '用户名不存在' : '密码错误', 'error'); return false; }
+
+      // 1. admin: 旧机制 (verify_login + KEY_PWD_HASH, 不进 Supabase Auth)
+      if (username === AUTH.ADMIN_CODE) {
+        var adminResult = await App.DB.verifyLogin(username, pwdHash);
+        if (!adminResult.success) { App.showToast('管理员密码错误', 'error'); return false; }
+        localStorage.setItem(CFG.KEY_USERNAME, username);
+        localStorage.setItem(CFG.KEY_PWD_HASH, pwdHash);
+        App.DB.setSyncCode(username);
+        return true;
+      }
+
+      // 2. 普通用户: 先用旧哈希 verify_login (防劫持 + 兼容老用户)
+      var verifyResult = await App.DB.verifyLogin(username, pwdHash);
+      if (!verifyResult.success) {
+        App.showToast(verifyResult.error === 'user_not_found' ? '用户名不存在' : '密码错误', 'error');
+        return false;
+      }
+
+      // 3. 查迁移状态, 未迁移则触发 migrate-user
+      var migStatus = await App.DB.getMigrationStatus(username);
+      if (!migStatus || !migStatus.migrated) {
+        var migResult = await App.DB.migrateUser(username, password, pwdHash);
+        if (!migResult || !migResult.success) {
+          throw new Error((migResult && migResult.error) || '老用户迁移失败, 请联系管理员');
+        }
+      }
+
+      // 4. Supabase Auth signIn 拿 JWT (账号已建, 密码=用户输入的明文)
+      var email = _fakeEmail(username);
+      var session = await _authSignIn(email, password);
+
+      // 5. 存会话
+      App.DB.setAuthSession(session.user.id, session.access_token, session.refresh_token);
       localStorage.setItem(CFG.KEY_USERNAME, username);
-      localStorage.setItem(CFG.KEY_PWD_HASH, pwdHash);
+      localStorage.setItem(CFG.KEY_PWD_HASH, pwdHash);  // 兜底 (迁移校验 + admin 切换)
       App.DB.setSyncCode(username);
       return true;
     } catch (e) {
-      console.error('[Auth.login] 调用 verify_login RPC 失败:', e);
+      console.error('[Auth.login] 失败:', e);
       var msg = e && e.message ? e.message : String(e);
-      if (msg.indexOf('HTTP 404') >= 0 || msg.indexOf('PGRST202') >= 0) {
-        msg = '服务器未配置认证功能(缺少RPC函数)，请联系管理员执行 sql/setup_auth_rpc_fix.sql';
+      // Supabase Auth "Invalid credentials" → 密码错误
+      if (msg.indexOf('Invalid credentials') >= 0 || msg.indexOf('invalid') >= 0) {
+        msg = '密码错误或账号未迁移完成, 请用找回密码重置';
       }
       App.showToast('登录失败: ' + msg, 'error');
       return false;
@@ -256,8 +441,8 @@ App.Auth = (function () {
       var auth = await App.DB.getAuthorization(username);
       if (!auth) {
         var userInfo = await App.DB.getUserAuthInfo(username);
-        if (userInfo && userInfo.created_at) {
-          var createdMs = new Date(userInfo.created_at).getTime();
+        if (userInfo && userInfo.createdAt) {
+          var createdMs = new Date(userInfo.createdAt).getTime();
           var trialEnd = createdMs + AUTH.TRIAL_DAYS * 24 * 60 * 60 * 1000;
           if (Date.now() < trialEnd) return 'trial';
         }
@@ -269,6 +454,8 @@ App.Auth = (function () {
     } catch (e) { console.error('[Auth] checkAuth error:', e); return 'none'; }
   }
 
+  // ========== 捐赠/支付页 ==========
+
   function showDonationPage() {
     var username = getCurrentUser() || '';
     _renderDonationPage(username, null);
@@ -278,7 +465,6 @@ App.Auth = (function () {
   function _renderDonationPage(username, promo) {
     var promoText = (promo && promo.text) ? promo.text : '捐赠20元得1年使用权';
     var onlinePayBtn = '';
-    // 配置了 YunGouOS Edge Function 时显示在线支付按钮
     if (App.Config.YUNGOU && App.Config.YUNGOU.CREATE_ORDER_URL) {
       onlinePayBtn = '<button id="btnOnlinePay" style="width:100%;padding:12px;background:#07C160;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:500;cursor:pointer;margin-bottom:12px;">在线支付 (微信)</button>';
     }
@@ -310,12 +496,10 @@ App.Auth = (function () {
     document.getElementById('btnDonationLogout').addEventListener('click', logout);
   }
 
-  /** 在线支付: 创建订单 -> 显示二维码 -> 轮询状态 -> 自动开通 */
   async function _startOnlinePay(username, promo) {
     var amount = (promo && promo.amount) ? promo.amount : '20';
     var promoText = (promo && promo.text) ? promo.text : '捐赠' + amount + '元得1年使用权';
 
-    // 1. 显示加载状态
     _showOverlay(
       '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,#4A90D9,#357ABD);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;box-sizing:border-box;">' +
         '<div style="background:#fff;border-radius:12px;padding:32px 24px;width:100%;max-width:340px;text-align:center;">' +
@@ -325,7 +509,6 @@ App.Auth = (function () {
     );
 
     try {
-      // 2. 调用 Edge Function 创建订单
       var resp = await fetch(App.Config.YUNGOU.CREATE_ORDER_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -338,10 +521,7 @@ App.Auth = (function () {
       var qrcode = data.qrcode;
       var priceYuan = (data.total_fee / 100).toFixed(2);
 
-      // 3. 显示二维码
       _showPayQrCode(username, outTradeNo, qrcode, priceYuan, promoText);
-
-      // 4. 轮询订单状态 (每3秒一次, 最多轮询15分钟)
       _pollOrderStatus(outTradeNo, username);
     } catch (e) {
       App.showToast('创建订单失败: ' + e.message, 'error');
@@ -349,7 +529,6 @@ App.Auth = (function () {
     }
   }
 
-  /** 显示支付二维码 */
   function _showPayQrCode(username, outTradeNo, qrcode, priceYuan, promoText) {
     var html =
       '<div class="auth-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,#4A90D9,#357ABD);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;box-sizing:border-box;overflow-y:auto;">' +
@@ -375,11 +554,10 @@ App.Auth = (function () {
   var _pollTimer = null;
   var _pollCount = 0;
 
-  /** 轮询订单状态 */
   function _pollOrderStatus(outTradeNo, username) {
     if (_pollTimer) clearInterval(_pollTimer);
     _pollCount = 0;
-    var maxPolls = 300; // 3秒 * 300 = 15分钟
+    var maxPolls = 300;
     _pollTimer = setInterval(async function () {
       _pollCount++;
       if (_pollCount > maxPolls) {
@@ -394,14 +572,9 @@ App.Auth = (function () {
           if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
           var tip2 = document.getElementById('payStatusTip');
           if (tip2) { tip2.textContent = '支付成功，正在开通授权...'; tip2.style.color = '#27AE60'; }
-          // 支付成功, 刷新授权进入应用
-          setTimeout(function () {
-            _refreshAuth();
-          }, 1000);
+          setTimeout(function () { _refreshAuth(); }, 1000);
         }
-      } catch (e) {
-        // 轮询出错不中断, 继续尝试
-      }
+      } catch (e) { /* 轮询出错不中断 */ }
     }, 3000);
   }
 
@@ -450,10 +623,28 @@ App.Auth = (function () {
     } catch (e) { console.error('[Auth] showMessagesPopup error:', e); }
   }
 
+  // ========== 会话查询 ==========
+
   function logout() { _clearAuthStorage(); _appStarted = false; showLoginPage(); }
-  function isLoggedIn() { return !!(localStorage.getItem(CFG.KEY_USERNAME) && localStorage.getItem(CFG.KEY_PWD_HASH)); }
+
+  /**
+   * 是否已登录:
+   *   admin → 有 KEY_PWD_HASH
+   *   普通用户 → 有 uid + access_token (JWT)
+   */
+  function isLoggedIn() {
+    var username = localStorage.getItem(CFG.KEY_USERNAME);
+    if (!username) return false;
+    if (username === AUTH.ADMIN_CODE) {
+      return !!localStorage.getItem(CFG.KEY_PWD_HASH);
+    }
+    return !!(App.DB.getUserId() && App.DB.getAccessToken());
+  }
+
   function getCurrentUser() { return localStorage.getItem(CFG.KEY_USERNAME) || null; }
   function getAdminPwdHash() { return localStorage.getItem(CFG.KEY_PWD_HASH) || ''; }
+
+  // ========== 修改密码 / 修改密保 ==========
 
   function changePasswordForm() {
     var username = getCurrentUser();
@@ -464,6 +655,12 @@ App.Auth = (function () {
     document.getElementById('btnChgPwdSubmit').addEventListener('click', function () { _handleChangePassword(username); });
   }
 
+  /**
+   * v1.9.0: 走 update-password Edge Function
+   *   - admin: 不进 Supabase Auth, 只需改 user_auth 旧哈希 → 走 change_sec_question 不行
+   *     admin 改密走旧路径 (verify_login 校验旧哈希 + 直接 PATCH user_auth)
+   *     简化: admin 也走 Edge Function, verify_type=password, 内部只改 user_auth (admin 无 Auth 账号, findUserIdByEmail 返回 null, 跳过 bcrypt)
+   */
   async function _handleChangePassword(username) {
     var oldPwd = document.getElementById('chgOldPwd').value;
     var newPwd = document.getElementById('chgNewPwd').value;
@@ -475,7 +672,7 @@ App.Auth = (function () {
     try {
       var oldHash = await hashPassword(username, oldPwd);
       var newHash = await hashPassword(username, newPwd);
-      await App.DB.changePassword(username, oldHash, newHash);
+      await App.DB.changePassword(username, oldPwd, newPwd, oldHash, newHash);
       localStorage.setItem(CFG.KEY_PWD_HASH, newHash);
       App.showToast('密码修改成功', 'success'); App.hideModal();
     } catch (e) { App.showToast('修改失败: ' + e.message, 'error'); }
@@ -493,6 +690,7 @@ App.Auth = (function () {
     document.getElementById('btnChgSecSubmit').addEventListener('click', function () { _handleChangeSecQuestion(username); });
   }
 
+  /** 修改密保: 走 change_sec_question RPC (需密码校验, 仅改 user_auth, 不涉及 bcrypt) */
   async function _handleChangeSecQuestion(username) {
     var pwd = document.getElementById('chgSecPwd').value;
     var secQIdx = parseInt(document.getElementById('chgSecQuestion').value, 10);

@@ -1,5 +1,11 @@
 /**
- * Supabase 数据层
+ * Supabase 数据层 (v1.9.0 安全加固版)
+ *
+ * v1.9.0 变更:
+ *   - 用户隔离从 "sync_code 前端软隔离" 升级为 "Supabase Auth JWT + RLS auth.uid()=user_id 强隔离"
+ *   - 所有业务请求 (words/records) 带 access_token 让 RLS 生效, anon key 仅用于未登录的 RPC
+ *   - access_token 过期自动刷新 (401 → refresh → 重试)
+ *
  * 通过 REST API (PostgREST) 操作云端数据库
  * 对外 API 与 IndexedDB 版本完全一致, 其他模块无需修改
  */
@@ -20,7 +26,7 @@ App.DB = (function () {
   function wordToRow(w) {
     return {
       id: w.id || _uuid(),
-      sync_code: w.syncCode || getSyncCode(),
+      user_id: w.userId || getUserId(),   // v1.9.0: sync_code → user_id
       word: w.word || '',
       phonetic: w.phonetic || '',
       part_of_speech: w.partOfSpeech || '',
@@ -41,7 +47,8 @@ App.DB = (function () {
     if (!r) return null;
     return {
       id: r.id,
-      syncCode: r.sync_code,
+      userId: r.user_id,                    // v1.9.0: user_id (sync_code 兼容字段保留为旧值)
+      syncCode: r.sync_code,               // 向后兼容 (历史字段, 新数据不再写)
       word: r.word,
       phonetic: r.phonetic || '',
       partOfSpeech: r.part_of_speech || '',
@@ -61,7 +68,7 @@ App.DB = (function () {
   function recordToRow(rec) {
     return {
       id: rec.id || _uuid(),
-      sync_code: rec.syncCode || getSyncCode(),
+      user_id: rec.userId || getUserId(),   // v1.9.0: sync_code → user_id
       word_id: rec.wordId || null,
       word: rec.word || '',
       direction: rec.direction || '',
@@ -75,7 +82,8 @@ App.DB = (function () {
     if (!r) return null;
     return {
       id: r.id,
-      syncCode: r.sync_code,
+      userId: r.user_id,
+      syncCode: r.sync_code,                // 向后兼容
       wordId: r.word_id,
       word: r.word,
       direction: r.direction,
@@ -85,43 +93,140 @@ App.DB = (function () {
     };
   }
 
+  // ========== Supabase Auth 会话管理 (v1.9.0 新增) ==========
+
+  /** 当前登录用户的 Supabase Auth uid (RLS 强隔离核心) */
+  function getUserId() {
+    return localStorage.getItem(App.Config.KEY_UID) || null;
+  }
+
+  function getAccessToken() {
+    return localStorage.getItem(App.Config.KEY_ACCESS_TOKEN) || null;
+  }
+
+  function getRefreshToken() {
+    return localStorage.getItem(App.Config.KEY_REFRESH_TOKEN) || null;
+  }
+
+  /** 登录成功后存储会话 (auth.js 调用) */
+  function setAuthSession(uid, accessToken, refreshToken) {
+    if (uid) localStorage.setItem(App.Config.KEY_UID, uid);
+    if (accessToken) localStorage.setItem(App.Config.KEY_ACCESS_TOKEN, accessToken);
+    if (refreshToken) localStorage.setItem(App.Config.KEY_REFRESH_TOKEN, refreshToken);
+  }
+
+  /** 退出登录时清除会话 (auth.js 调用) */
+  function clearAuthSession() {
+    localStorage.removeItem(App.Config.KEY_UID);
+    localStorage.removeItem(App.Config.KEY_ACCESS_TOKEN);
+    localStorage.removeItem(App.Config.KEY_REFRESH_TOKEN);
+  }
+
+  // access_token 刷新锁 (并发 401 只刷新一次, 其他请求等待)
+  var _refreshingPromise = null;
+
+  /**
+   * 用 refresh_token 换新的 access_token
+   * @returns {Promise<boolean>} 刷新是否成功
+   */
+  async function _refreshAccessToken() {
+    // 已有正在进行的刷新, 复用其 Promise
+    if (_refreshingPromise) return _refreshingPromise;
+
+    var refreshToken = getRefreshToken();
+    if (!refreshToken) return false;
+
+    _refreshingPromise = (async function () {
+      try {
+        var resp = await fetch(
+          App.DBConfig.getUrl().replace(/\/+$/, '') + '/auth/v1/token?grant_type=refresh_token',
+          {
+            method: 'POST',
+            headers: {
+              'apikey': App.DBConfig.getKey(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ refresh_token: refreshToken }),
+          }
+        );
+        if (!resp.ok) return false;
+        var data = await resp.json();
+        if (data && data.access_token) {
+          localStorage.setItem(App.Config.KEY_ACCESS_TOKEN, data.access_token);
+          if (data.refresh_token) localStorage.setItem(App.Config.KEY_REFRESH_TOKEN, data.refresh_token);
+          if (data.user && data.user.id) localStorage.setItem(App.Config.KEY_UID, data.user.id);
+          return true;
+        }
+        return false;
+      } catch (e) {
+        console.error('[DB] 刷新 access_token 失败:', e);
+        return false;
+      } finally {
+        _refreshingPromise = null;
+      }
+    })();
+    return _refreshingPromise;
+  }
+
   // ========== Supabase REST 请求封装 ==========
 
+  /** 当前请求应使用的 Bearer token: 登录后用 access_token (RLS 生效), 未登录用 anon key (RPC 场景) */
+  function _bearerToken() {
+    return getAccessToken() || App.DBConfig.getKey();
+  }
+
+  /**
+   * 业务请求封装 (words/records 直查, 受 RLS 约束)
+   * 401 时自动刷新 token 并重试一次; 刷新失败抛错由上层处理登出
+   */
   async function api(method, table, query, body, options) {
     var url = App.DBConfig.getRestUrl() + table;
     if (query) url += '?' + query;
 
-    var headers = {
-      'apikey': App.DBConfig.getKey(),
-      'Authorization': 'Bearer ' + App.DBConfig.getKey(),
-      'Content-Type': 'application/json',
-    };
-
-    // 构建 Prefer 头 (支持 return, resolution, count)
-    var preferParts = [];
-    if (body) {
-      preferParts.push('return=representation');
-      if (options && options.upsert) {
-        preferParts.push('resolution=merge-duplicates');
+    function buildHeaders() {
+      var headers = {
+        'apikey': App.DBConfig.getKey(),
+        'Authorization': 'Bearer ' + _bearerToken(),
+        'Content-Type': 'application/json',
+      };
+      var preferParts = [];
+      if (body) {
+        preferParts.push('return=representation');
+        if (options && options.upsert) preferParts.push('resolution=merge-duplicates');
       }
-    }
-    if (options && options.count) {
-      preferParts.push('count=' + options.count);
-    }
-    if (preferParts.length > 0) {
-      headers['Prefer'] = preferParts.join(', ');
+      if (options && options.count) preferParts.push('count=' + options.count);
+      if (preferParts.length > 0) headers['Prefer'] = preferParts.join(', ');
+      if (method === 'HEAD' && options && options.count) headers['Range'] = '0-0';
+      return headers;
     }
 
-    // HEAD 请求需要通过 Range 头来获取计数
-    if (method === 'HEAD' && options && options.count) {
-      headers['Range'] = '0-0';
+    async function doFetch() {
+      var resp = await fetch(url, {
+        method: method,
+        headers: buildHeaders(),
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      // 401 → 刷新 token 并重试一次
+      if (resp.status === 401 && getRefreshToken()) {
+        var refreshed = await _refreshAccessToken();
+        if (refreshed) {
+          // 重建请求头 (含新 token) 重试一次
+          var resp2 = await fetch(url, {
+            method: method,
+            headers: buildHeaders(),
+            body: body ? JSON.stringify(body) : undefined,
+          });
+          return resp2;
+        }
+        // 刷新失败: 清会话, 由上层引导重新登录
+        clearAuthSession();
+        throw new Error('登录已过期, 请重新登录');
+      }
+      return resp;
     }
 
-    var resp = await fetch(url, {
-      method: method,
-      headers: headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    var resp = await doFetch();
 
     if (!resp.ok) {
       var err = {};
@@ -134,11 +239,8 @@ App.DB = (function () {
       throw new Error(err.message || ('HTTP ' + resp.status));
     }
 
-    // 返回完整响应 (供外部读取 Content-Range 等 headers)
     if (options && options.returnResponse) return resp;
-
     if (method === 'HEAD') return resp;
-
     if (resp.status === 204) return null;
 
     var text = await resp.text();
@@ -154,7 +256,6 @@ App.DB = (function () {
   function extractTotalFromRange(resp) {
     if (!resp || !resp.headers) return 0;
     var range = resp.headers.get('content-range') || '';
-    // 格式: "0-0/3800" 或 "*/3800" 或 "0-0/*"
     var parts = range.split('/');
     if (parts.length >= 2) {
       var total = parseInt(parts[1], 10);
@@ -166,18 +267,11 @@ App.DB = (function () {
   /**
    * 并发分页拉取 (先用 count=exact 拿总数, 再并发拉取所有页)
    * 相比串行 while 循环, 可将 N 页的等待时间从 N×T 降到约 ceil(N/concurrency)×T
-   * @param {string} table - 表名
-   * @param {string} base - 查询参数 (不含 limit/offset)
-   * @param {Function} rowMapper - 行转换函数 rowMapper(row) => item
-   * @param {number} [pageSize=1000] - 每页大小 (受 Supabase 硬上限 1000 约束)
-   * @param {number} [concurrency=5] - 每批并发请求数 (浏览器同域并发上限约 6)
-   * @returns {Promise<Array>} 全部数据
    */
   async function fetchAllPages(table, base, rowMapper, pageSize, concurrency) {
     pageSize = pageSize || 1000;
     concurrency = concurrency || 5;
 
-    // 1. 拉取第一页, 同时通过 count=exact 获取总数
     var firstResp = await api('GET', table, base + '&limit=' + pageSize + '&offset=0',
       null, { returnResponse: true, count: 'exact' });
     var firstRows = await firstResp.json();
@@ -185,10 +279,8 @@ App.DB = (function () {
     var all = [];
     for (var i = 0; i < firstRows.length; i++) all.push(rowMapper(firstRows[i]));
 
-    // 总数 <= 一页, 或第一页就不满, 直接返回
     if (total <= pageSize || firstRows.length < pageSize) return all;
 
-    // 2. 计算剩余页的 offset, 分批并发拉取
     var totalPages = Math.ceil(total / pageSize);
     var offsets = [];
     for (var p = 1; p < totalPages; p++) offsets.push(p * pageSize);
@@ -209,8 +301,9 @@ App.DB = (function () {
 
   /** 分页计数 (后备方案: 当 Content-Range 不可用时使用) */
   async function countByPaging(filter) {
-    var sc = getSyncCode();
-    var base = 'sync_code=eq.' + encodeURIComponent(sc);
+    var uid = getUserId();
+    if (!uid) return 0;
+    var base = 'user_id=eq.' + encodeURIComponent(uid);
     if (filter) base += '&' + filter;
     base += '&select=id';
     var PAGE = 1000;
@@ -234,18 +327,21 @@ App.DB = (function () {
       err.code = 'SUPABASE_NOT_CONFIGURED';
       throw err;
     }
-    // 不做主动连接测试, 首次查询时自然验证
   }
 
-  // ========== 用户名 (同步码) ==========
+  // ========== 用户名 (展示用, 兼容旧 badge) ==========
 
+  /** 返回当前用户名 (展示用, 非隔离凭证) */
   function getSyncCode() {
-    return localStorage.getItem(App.Config.KEY_SYNC_CODE) || App.Config.DEFAULT_SYNC_CODE;
+    return localStorage.getItem(App.Config.KEY_USERNAME)
+      || localStorage.getItem(App.Config.KEY_SYNC_CODE)
+      || App.Config.DEFAULT_SYNC_CODE;
   }
 
   function setSyncCode(code) {
     if (!code || !code.trim()) return;
     localStorage.setItem(App.Config.KEY_SYNC_CODE, code.trim());
+    localStorage.setItem(App.Config.KEY_USERNAME, code.trim());
   }
 
   // ========== 单词操作 ==========
@@ -276,20 +372,19 @@ App.DB = (function () {
     return rowToWord(rows[0]);
   }
 
-  /** 获取当前用户名下所有单词 (并发分页, 与 getLearnedWords 同机制, 避免丢词) */
+  /** 获取当前用户名下所有单词 (并发分页) */
   async function getAllWords() {
-    var sc = getSyncCode();
-    var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=created_at.asc';
+    var uid = getUserId();
+    var base = 'user_id=eq.' + encodeURIComponent(uid) + '&order=created_at.asc';
     return await fetchAllPages('words', base, rowToWord);
   }
 
   /** 获取新词 (未学习过的, 从不同位置随机抽取) */
   async function getNewWords(count) {
-    var sc = getSyncCode();
-    var scEnc = encodeURIComponent(sc);
-    var baseFilter = 'sync_code=eq.' + scEnc + '&total_count=eq.0';
+    var uid = getUserId();
+    var uidEnc = encodeURIComponent(uid);
+    var baseFilter = 'user_id=eq.' + uidEnc + '&total_count=eq.0';
 
-    // 1. 获取新词总数
     var total = 0;
     try {
       var countResp = await api('GET', 'words',
@@ -297,12 +392,9 @@ App.DB = (function () {
         null, { returnResponse: true, count: 'exact' });
       total = extractTotalFromRange(countResp);
     } catch (e) {}
-    if (!total) {
-      total = await countByPaging('total_count=eq.0');
-    }
+    if (!total) total = await countByPaging('total_count=eq.0');
     if (total === 0) return [];
 
-    // 2. 新词不多时全部拉取并洗牌
     if (total <= count * 3) {
       var rows = await api('GET', 'words', baseFilter + '&order=created_at.asc&limit=' + total);
       if (!rows) return [];
@@ -311,7 +403,6 @@ App.DB = (function () {
       return words.slice(0, count);
     }
 
-    // 3. 从 4 个随机位置并行拉取, 确保字母分布分散
     var BATCHES = 4;
     var perBatch = Math.max(Math.ceil(count / BATCHES) + 3, 8);
     var promises = [];
@@ -324,27 +415,21 @@ App.DB = (function () {
     }
     var results = await Promise.all(promises);
 
-    // 4. 合并去重
     var allWords = [];
     var seen = {};
     for (var r = 0; r < results.length; r++) {
       if (!results[r]) continue;
       for (var i = 0; i < results[r].length; i++) {
         var w = rowToWord(results[r][i]);
-        if (!seen[w.id]) {
-          seen[w.id] = true;
-          allWords.push(w);
-        }
+        if (!seen[w.id]) { seen[w.id] = true; allWords.push(w); }
       }
     }
     if (allWords.length === 0) return [];
 
-    // 5. 洗牌后截取
     shuffleArray(allWords);
     return allWords.slice(0, count);
   }
 
-  /** Fisher-Yates 洗牌 */
   function shuffleArray(arr) {
     for (var i = arr.length - 1; i > 0; i--) {
       var j = Math.floor(Math.random() * (i + 1));
@@ -354,61 +439,49 @@ App.DB = (function () {
 
   /** 获取复习候选词 (已学习过的, 按下次复习时间排序) */
   async function getReviewCandidates(count) {
-    var sc = getSyncCode();
-    // 多拉 3 倍, 供算法筛选 (抽样需要足够候选池)
+    var uid = getUserId();
     var limit = Math.min(count * 3, 500);
-    // 按 next_review_at 升序: 到期的词排前面, 确保优先拉取最该复习的
-    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
+    var params = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' +
       '&order=next_review_at.asc.nullsfirst' +
       '&limit=' + limit;
     var rows = await api('GET', 'words', params);
     if (!rows) return [];
 
-    // 前端按下次复习时间排序
     var words = rows.map(rowToWord);
-    // 计算每个单词的 nextReviewAt 并排序 (越紧急越靠前)
     words.sort(function (a, b) {
-      var nextA = getNextReviewTime(a);
-      var nextB = getNextReviewTime(b);
-      return nextA - nextB;
+      return getNextReviewTime(a) - getNextReviewTime(b);
     });
     return words;
   }
 
-  /** 计算单词的下次复习时间 — 直接委托给 algorithm.js, 消除重复逻辑 */
   function getNextReviewTime(word) {
-    // algorithm.js 在本文件之后加载, 但本函数在运行期(用户点击复习)才调用,
-    // 此时 App.Algorithm 已就绪
     if (App.Algorithm && App.Algorithm.getNextReviewAt) {
       return App.Algorithm.getNextReviewAt(word);
     }
-    // 极简兜底 (algorithm.js 加载异常时)
     if (!word.totalCount || word.totalCount === 0) return 0;
     if (word.nextReviewAt && word.nextReviewAt > 0) return word.nextReviewAt;
     return (word.lastLearnTime || 0) + (word.stability || 0);
   }
 
-  /** 获取单词总数 (Prefer: count=exact + 后备分页计数) */
+  /** 获取单词总数 */
   async function getWordCount() {
-    var sc = getSyncCode();
+    var uid = getUserId();
     try {
       var resp = await api('GET', 'words',
-        'sync_code=eq.' + encodeURIComponent(sc) + '&limit=1',
+        'user_id=eq.' + encodeURIComponent(uid) + '&limit=1',
         null, { returnResponse: true, count: 'exact' });
       var total = extractTotalFromRange(resp);
       if (total > 0) return total;
     } catch (e) {}
-    // 后备: 分页计数
     return await countByPaging('');
   }
 
-  /** 获取新词数量 (total_count=0) */
   async function getNewWordCount() {
-    var sc = getSyncCode();
+    var uid = getUserId();
     try {
       var resp = await api('GET', 'words',
-        'sync_code=eq.' + encodeURIComponent(sc) + '&total_count=eq.0&limit=1',
+        'user_id=eq.' + encodeURIComponent(uid) + '&total_count=eq.0&limit=1',
         null, { returnResponse: true, count: 'exact' });
       var total = extractTotalFromRange(resp);
       if (total > 0) return total;
@@ -416,12 +489,11 @@ App.DB = (function () {
     return await countByPaging('total_count=eq.0');
   }
 
-  /** 获取已学习单词数量 (total_count>0) */
   async function getLearnedWordCount() {
-    var sc = getSyncCode();
+    var uid = getUserId();
     try {
       var resp = await api('GET', 'words',
-        'sync_code=eq.' + encodeURIComponent(sc) + '&total_count=gt.0&limit=1',
+        'user_id=eq.' + encodeURIComponent(uid) + '&total_count=gt.0&limit=1',
         null, { returnResponse: true, count: 'exact' });
       var total = extractTotalFromRange(resp);
       if (total > 0) return total;
@@ -429,11 +501,9 @@ App.DB = (function () {
     return await countByPaging('total_count=gt.0');
   }
 
-  /** 获取已掌握单词数量 (熟练度>=85%) */
   async function getMasteredWordCount() {
-    var sc = getSyncCode();
-    // 需要计算 known_count/total_count >= 0.85, 分页拉取统计字段
-    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
+    var uid = getUserId();
+    var params = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' +
       '&select=known_count,total_count';
     var PAGE = 1000;
@@ -444,9 +514,7 @@ App.DB = (function () {
       if (!rows || rows.length === 0) break;
       for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
-        if (r.known_count && r.total_count && r.known_count / r.total_count >= 0.85) {
-          count++;
-        }
+        if (r.known_count && r.total_count && r.known_count / r.total_count >= 0.85) count++;
       }
       if (rows.length < PAGE) break;
       offset += PAGE;
@@ -454,20 +522,15 @@ App.DB = (function () {
     return count;
   }
 
-  /** 获取已学习的单词 (total_count > 0), 用于统计和熟练度复习
-   * 每页 1000 条循环拉取, 兼容 Supabase max-rows 服务端硬上限 */
+  /** 获取已学习的单词 (total_count > 0) */
   async function getLearnedWords(limit) {
-    var sc = getSyncCode();
-    var base = 'sync_code=eq.' + encodeURIComponent(sc) +
+    var uid = getUserId();
+    var base = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' +
       '&order=last_learn_time.desc';
 
-    // 无上限: 走并发分页 (统计页/熟练度复习等全量场景)
-    if (!limit) {
-      return await fetchAllPages('words', base, rowToWord);
-    }
+    if (!limit) return await fetchAllPages('words', base, rowToWord);
 
-    // 有上限: 串行拉取前 N 条 (提前结束, 无需拉全部)
     var PAGE = 1000;
     var offset = 0;
     var all = [];
@@ -490,34 +553,23 @@ App.DB = (function () {
     limit = limit || App.Config.SEARCH_MAX_ROWS;
 
     if (!q) {
-      // 空查询: 拉取全部单词, 前端按熟练度升序排序后分页
-      // (原 FETCH_BATCH=500 只拉 total_count 最小的 500 条, 会遗漏熟练度
-      //  最低的词, 导致排序结果不正确)
-      var sc = getSyncCode();
-      var base = 'sync_code=eq.' + encodeURIComponent(sc);
+      var uid = getUserId();
+      var base = 'user_id=eq.' + encodeURIComponent(uid);
       var words = await fetchAllPages('words', base, rowToWord);
-
-      // 前端按熟练度升序 (从低到高), 熟练度相同按创建时间升序
       words.sort(function (a, b) {
         var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
         var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
         if (pa !== pb) return pa - pb;
         return (a.createdAt || 0) - (b.createdAt || 0);
       });
-
-      var total = words.length;
-      var sliced = words.slice(offset, offset + limit);
-      return { words: sliced, total: total };
+      return { words: words.slice(offset, offset + limit), total: words.length };
     }
 
-    // 有查询: 用 PostgREST or + ilike 在数据库层过滤, 并发分页拉全部匹配词
-    var sc = getSyncCode();
+    var uid = getUserId();
     var qEnc = encodeURIComponent(q);
-    // * 是 PostgREST ilike 的通配符; 同时匹配 word 和 chinese_meaning
     var orFilter = 'or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
-    var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&' + orFilter;
+    var base = 'user_id=eq.' + encodeURIComponent(uid) + '&' + orFilter;
 
-    // 拉取全部匹配词 (并发分页), 前端按熟练度升序排序后分页
     var words = await fetchAllPages('words', base, rowToWord);
     words.sort(function (a, b) {
       var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
@@ -525,30 +577,26 @@ App.DB = (function () {
       if (pa !== pb) return pa - pb;
       return (a.createdAt || 0) - (b.createdAt || 0);
     });
-
-    var total = words.length;
-    return { words: words.slice(offset, offset + limit), total: total };
+    return { words: words.slice(offset, offset + limit), total: words.length };
   }
 
   /** 批量导入: mode = 'overwrite' | 'incremental' */
   async function addWordsBatch(words, mode) {
-    var sc = getSyncCode();
+    var uid = getUserId();
 
     if (mode === 'overwrite') {
-      // 清空现有词库和记录 (走 RPC, records 表已撤销 anon DELETE 权限)
-      await rpc('clear_user_data', { p_sync_code: sc });
+      // clear_user_data 现基于 auth.uid() (RPC 内部取 JWT uid, 不再传 sync_code)
+      await rpc('clear_user_data', {});
     }
 
-    // 增量模式: 只拉取已有单词的 word + id + 统计字段 (减少传输量)
     var existingMap = {};
     if (mode === 'incremental') {
-      var scEnc = encodeURIComponent(sc);
+      var uidEnc = encodeURIComponent(uid);
       var PAGE = 1000;
       var offset = 0;
       while (true) {
-        // 只选取去重和保留统计所需的字段 (含 stability 和 next_review_at)
         var rows = await api('GET', 'words',
-          'sync_code=eq.' + scEnc +
+          'user_id=eq.' + uidEnc +
           '&select=id,word,total_count,known_count,last_known_time,last_learn_time,stability,next_review_at,created_at' +
           '&order=created_at.asc&limit=' + PAGE + '&offset=' + offset);
         if (!rows || rows.length === 0) break;
@@ -560,15 +608,13 @@ App.DB = (function () {
       }
     }
 
-    // 构建写入行
     var rowsToWrite = words.map(function (w) {
       var key = (w.word || '').toLowerCase();
       var old = existingMap[key];
       if (old) {
-        // 已存在: 更新5个字段, 保留学习统计和 id
         return {
           id: old.id,
-          sync_code: sc,
+          user_id: uid,
           word: w.word,
           phonetic: w.phonetic || '',
           part_of_speech: w.partOfSpeech || '',
@@ -584,11 +630,9 @@ App.DB = (function () {
           updated_at: Date.now(),
         };
       }
-      // 新增
       return wordToRow(w);
     });
 
-    // 批量 upsert (每批 500 条, 用 merge-duplicates 避免主键冲突)
     var BATCH = 500;
     for (var i = 0; i < rowsToWrite.length; i += BATCH) {
       var batch = rowsToWrite.slice(i, i + BATCH);
@@ -606,37 +650,34 @@ App.DB = (function () {
   }
 
   async function getRecords(startDate, endDate) {
-    var sc = getSyncCode();
-    var base = 'sync_code=eq.' + encodeURIComponent(sc);
+    var uid = getUserId();
+    var base = 'user_id=eq.' + encodeURIComponent(uid);
     if (startDate) base += '&timestamp=gte.' + startDate;
     if (endDate) base += '&timestamp=lt.' + endDate;
     base += '&order=timestamp.desc';
-    // 并发分页拉取 (每页1000, 每批5个并发)
     return await fetchAllPages('records', base, rowToRecord);
   }
 
   async function getAllRecords() {
-    var sc = getSyncCode();
-    var base = 'sync_code=eq.' + encodeURIComponent(sc) + '&order=timestamp.desc';
+    var uid = getUserId();
+    var base = 'user_id=eq.' + encodeURIComponent(uid) + '&order=timestamp.desc';
     return await fetchAllPages('records', base, rowToRecord);
   }
 
-  // ========== 清空操作 ==========
+  // ========== 清空操作 (RPC: clear_user_data 基于 auth.uid()) ==========
 
   async function clearWords() {
-    // 走 RPC: records 表已撤销 anon DELETE, 必须通过 SECURITY DEFINER 函数清理
-    await rpc('clear_user_data', { p_sync_code: getSyncCode() });
+    await rpc('clear_user_data', {});
   }
 
   async function clearAll() {
-    // clear_user_data 同时清空 words 和 records
-    await rpc('clear_user_data', { p_sync_code: getSyncCode() });
+    await rpc('clear_user_data', {});
   }
 
   /** 按单词文本精确查找 (不区分大小写) */
   async function findWordByText(wordText) {
-    var sc = getSyncCode();
-    var params = 'sync_code=eq.' + encodeURIComponent(sc) +
+    var uid = getUserId();
+    var params = 'user_id=eq.' + encodeURIComponent(uid) +
       '&word=ilike.' + encodeURIComponent(wordText.trim());
     var rows = await api('GET', 'words', params);
     if (!rows || rows.length === 0) return null;
@@ -647,28 +688,45 @@ App.DB = (function () {
 
   async function exportAll() {
     return {
-      syncCode: getSyncCode(),
+      username: getSyncCode(),
+      userId: getUserId(),
       words: await getAllWords(),
       records: await getAllRecords(),
       exportedAt: Date.now(),
     };
   }
 
-  // ========== 授权系统数据库操作 ==========
+  // ========== 授权系统数据库操作 (全部 RPC, 不直接访问表) ==========
 
-  /** 调用 Supabase RPC 函数 */
+  /** 调用 Supabase RPC 函数 (SECURITY DEFINER, 不受 RLS 限制); 401 自动刷新重试 */
   async function rpc(funcName, params) {
     var url = App.DBConfig.getRestUrl() + 'rpc/' + funcName;
-    var headers = {
-      'apikey': App.DBConfig.getKey(),
-      'Authorization': 'Bearer ' + App.DBConfig.getKey(),
-      'Content-Type': 'application/json',
-    };
+    function buildHeaders() {
+      return {
+        'apikey': App.DBConfig.getKey(),
+        'Authorization': 'Bearer ' + _bearerToken(),
+        'Content-Type': 'application/json',
+      };
+    }
     var resp = await fetch(url, {
       method: 'POST',
-      headers: headers,
+      headers: buildHeaders(),
       body: JSON.stringify(params || {}),
     });
+    // 401 → 刷新 token 重试一次 (与 api() 一致, 保证 RPC 在 token 过期时自愈)
+    if (resp.status === 401 && getRefreshToken()) {
+      var refreshed = await _refreshAccessToken();
+      if (refreshed) {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: buildHeaders(),
+          body: JSON.stringify(params || {}),
+        });
+      } else {
+        clearAuthSession();
+        throw new Error('登录已过期, 请重新登录');
+      }
+    }
     if (!resp.ok) {
       var text = await resp.text();
       throw new Error(text || ('RPC ' + funcName + ' failed: HTTP ' + resp.status));
@@ -678,13 +736,14 @@ App.DB = (function () {
     try { return JSON.parse(body); } catch (e) { return body; }
   }
 
-  /** 注册用户 (RPC, 不暴露表数据) */
-  async function registerUser(username, passwordHash, secQuestion, secAnswerHash) {
+  /** 注册用户 (先 supabase signUp 拿 uid, 再调此 RPC 存密保 + 绑 user_id) */
+  async function registerUser(username, passwordHash, secQuestion, secAnswerHash, userId) {
     var result = await rpc('register_user', {
       p_username: username,
       p_pwd_hash: passwordHash,
       p_sec_question: secQuestion,
       p_sec_answer_hash: secAnswerHash,
+      p_user_id: userId || null,
     });
     if (!result || !result.success) {
       var err = (result && result.error === 'exists') ? '用户名已存在' : '注册失败';
@@ -692,26 +751,33 @@ App.DB = (function () {
     }
   }
 
-  /** 验证登录 (RPC, 只返回 true/false, 不返回哈希) */
+  /** 绑定 user_auth.user_id (注册第二步, 失败可重试) */
+  async function linkUserId(username, userId) {
+    var result = await rpc('link_user_id', { p_username: username, p_user_id: userId });
+    if (!result || !result.success) {
+      throw new Error((result && result.error) || '绑定 user_id 失败');
+    }
+  }
+
+  /** 查询用户是否已迁移到 Supabase Auth (登录流程用) */
+  async function getMigrationStatus(username) {
+    var result = await rpc('get_user_migration_status', { p_username: username });
+    return result || { success: false, migrated: false };
+  }
+
   async function verifyLogin(username, passwordHash) {
-    var result = await rpc('verify_login', {
-      p_username: username,
-      p_pwd_hash: passwordHash,
-    });
+    var result = await rpc('verify_login', { p_username: username, p_pwd_hash: passwordHash });
     return result || { success: false, error: 'unknown' };
   }
 
-  /** 检查用户名是否存在 (RPC) */
   async function usernameExists(username) {
     return await rpc('username_exists', { p_username: username });
   }
 
-  /** 获取密保问题 (RPC, 不返回哈希) */
   async function getSecQuestion(username) {
     return await rpc('get_sec_question', { p_username: username });
   }
 
-  /** 验证密保答案 (RPC) */
   async function verifySecAnswer(username, answerHash) {
     return await rpc('verify_sec_answer', {
       p_username: username,
@@ -719,20 +785,28 @@ App.DB = (function () {
     });
   }
 
-  /** 重置密码 (RPC, 需密保答案验证) */
-  async function resetPassword(username, newPasswordHash, secAnswerHash) {
-    var result = await rpc('reset_password', {
-      p_username: username,
-      p_new_pwd_hash: newPasswordHash,
-      p_sec_answer_hash: secAnswerHash,
+  /**
+   * 重置密码 (v1.9.0: 改走 update-password Edge Function, 同步更新 bcrypt + 旧哈希)
+   * @param username 用户名
+   * @param newPassword 新密码明文
+   * @param newPwdHash 新密码 SHA-256(username+pwd+salt)
+   * @param secAnswerHash 密保答案 SHA-256 (找回密码校验用)
+   */
+  async function resetPassword(username, newPassword, newPwdHash, secAnswerHash) {
+    var result = await callEdgeFunction('UPDATE_PASSWORD_URL', {
+      username: username,
+      new_password: newPassword,
+      new_pwd_hash: newPwdHash,
+      verify_type: 'sec_answer',
+      verify_value: secAnswerHash,
     });
     if (!result || !result.success) {
-      var err = (result && result.error === 'invalid_answer') ? '密保答案错误' : '重置失败';
+      var err = (result && result.error && result.error.indexOf('sec_answer') >= 0) ? '密保答案错误' : '重置失败';
       throw new Error(err);
     }
   }
 
-  /** 获取用户信息 (RPC, Profile 展示用, 不返回哈希) */
+  /** 获取用户信息 (RPC, Profile 展示用) */
   async function getUserAuthInfo(username) {
     var result = await rpc('get_user_auth_info', { p_username: username });
     if (!result) return null;
@@ -743,20 +817,29 @@ App.DB = (function () {
     };
   }
 
-  /** 修改密码 (RPC, 需原密码验证) */
-  async function changePassword(username, oldPwdHash, newPwdHash) {
-    var result = await rpc('change_password', {
-      p_username: username,
-      p_old_pwd_hash: oldPwdHash,
-      p_new_pwd_hash: newPwdHash,
+  /**
+   * 修改密码 (v1.9.0: 改走 update-password Edge Function, 同步更新 bcrypt + 旧哈希)
+   * @param username 用户名
+   * @param oldPassword 旧密码明文
+   * @param newPassword 新密码明文
+   * @param oldPwdHash 旧密码 SHA-256 (校验用)
+   * @param newPwdHash 新密码 SHA-256 (写入 user_auth)
+   */
+  async function changePassword(username, oldPassword, newPassword, oldPwdHash, newPwdHash) {
+    var result = await callEdgeFunction('UPDATE_PASSWORD_URL', {
+      username: username,
+      new_password: newPassword,
+      new_pwd_hash: newPwdHash,
+      verify_type: 'password',
+      verify_value: oldPwdHash,
     });
     if (!result || !result.success) {
-      var err = (result && result.error === 'wrong_password') ? '原密码错误' : '修改失败';
+      var err = (result && result.error && (result.error.indexOf('wrong') >= 0 || result.error.indexOf('原密码') >= 0)) ? '原密码错误' : '修改失败';
       throw new Error(err);
     }
   }
 
-  /** 修改密保问题 (RPC, 需密码验证) */
+  /** 修改密保问题 (RPC, 需密码验证; 仅改 user_auth, 不涉及 bcrypt) */
   async function changeSecQuestion(username, pwdHash, secQuestion, secAnswerHash) {
     var result = await rpc('change_sec_question', {
       p_username: username,
@@ -770,7 +853,6 @@ App.DB = (function () {
     }
   }
 
-  /** 获取授权状态 (RPC, 替代直接查询 authorizations 表) */
   async function getAuthorization(username) {
     var result = await rpc('get_user_authorization', { p_username: username });
     if (!result) return null;
@@ -783,14 +865,11 @@ App.DB = (function () {
     };
   }
 
-  /** 读取促销配置 */
   async function getPromoConfig() {
     var rows = await api('GET', 'admin_config',
       'key=in.(promo_amount,promo_years,promo_text)');
     var config = {};
-    if (rows) {
-      rows.forEach(function (r) { config[r.key] = r.value; });
-    }
+    if (rows) rows.forEach(function (r) { config[r.key] = r.value; });
     return {
       amount: config.promo_amount || '20',
       years: config.promo_years || '1',
@@ -798,24 +877,19 @@ App.DB = (function () {
     };
   }
 
-  /** 查询支付订单状态 (前端轮询用) */
   async function getPayOrderStatus(outTradeNo) {
     return await rpc('get_pay_order_status', { p_out_trade_no: outTradeNo });
   }
 
-  /** 获取未读留言 */
   async function getUnreadMessages(username) {
-    // 先获取已读留言ID
     var readRows = await api('GET', 'user_read_messages',
       'username=eq.' + encodeURIComponent(username) + '&select=message_id');
     var readIds = (readRows || []).map(function (r) { return r.message_id; });
 
-    // 获取所有active留言
     var allMessages = await api('GET', 'admin_messages',
       'status=eq.active&order=created_at.desc');
     if (!allMessages) return [];
 
-    // 过滤未读
     return allMessages.filter(function (m) {
       return readIds.indexOf(m.id) === -1;
     }).map(function (m) {
@@ -823,16 +897,55 @@ App.DB = (function () {
     });
   }
 
-  /** 标记留言为已读 */
   async function markMessageRead(username, messageId) {
     var body = { username: username, message_id: messageId };
     await api('POST', 'user_read_messages', null, body);
   }
 
+  // ========== Edge Function 调用 (v1.9.0: migrate-user / update-password) ==========
+
+  /** 调用 Edge Function (config.js EDGE_FUNCTIONS 里的 key) */
+  async function callEdgeFunction(configKey, payload) {
+    var url = (App.Config.EDGE_FUNCTIONS && App.Config.EDGE_FUNCTIONS[configKey]) || '';
+    if (!url) throw new Error('Edge Function 未配置: ' + configKey);
+    var resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    });
+    var text = await resp.text();
+    var data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (!resp.ok) {
+      var msg = (data && data.error) ? data.error : ('HTTP ' + resp.status);
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  /** 老用户迁移 (前端登录流程调用: 建 Supabase Auth 账号 + 回填 user_id) */
+  async function migrateUser(username, password, pwdHash) {
+    return await callEdgeFunction('MIGRATE_USER_URL', {
+      username: username,
+      password: password,
+      pwd_hash: pwdHash,
+    });
+  }
+
+  // ========== 导出 ==========
+
   return {
     init: init,
+    // 会话 (v1.9.0)
+    getUserId: getUserId,
+    getAccessToken: getAccessToken,
+    setAuthSession: setAuthSession,
+    clearAuthSession: clearAuthSession,
+    refreshAccessToken: _refreshAccessToken,
+    // 用户名 (展示用)
     getSyncCode: getSyncCode,
     setSyncCode: setSyncCode,
+    // 单词
     addWord: addWord,
     addWordsBatch: addWordsBatch,
     updateWord: updateWord,
@@ -848,15 +961,20 @@ App.DB = (function () {
     getNewWordCount: getNewWordCount,
     getLearnedWordCount: getLearnedWordCount,
     getMasteredWordCount: getMasteredWordCount,
+    // 记录
     addRecord: addRecord,
     getRecords: getRecords,
     getAllRecords: getAllRecords,
     clearWords: clearWords,
     clearAll: clearAll,
     exportAll: exportAll,
-    // 授权系统 (全部通过 RPC, 不直接访问表)
+    // 授权系统 (RPC + Edge Function)
     rpc: rpc,
+    callEdgeFunction: callEdgeFunction,
+    migrateUser: migrateUser,
     registerUser: registerUser,
+    linkUserId: linkUserId,
+    getMigrationStatus: getMigrationStatus,
     verifyLogin: verifyLogin,
     usernameExists: usernameExists,
     getSecQuestion: getSecQuestion,

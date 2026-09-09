@@ -60,7 +60,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.8.4',
+  APP_VERSION: '1.9.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -71,10 +71,13 @@ App.Config = {
   STORE_RECORDS: 'records',
 
   // localStorage 键
-  KEY_SYNC_CODE: 'beidanci_sync_code',
+  KEY_SYNC_CODE: 'beidanci_sync_code',   // 历史用户名 (显示用, 兼容旧 badge)
   KEY_LAST_TAB: 'beidanci_last_tab',
-  KEY_USERNAME: 'beidanci_username',
-  KEY_PWD_HASH: 'beidanci_pwd_hash',
+  KEY_USERNAME: 'beidanci_username',     // 用户名 (展示 + 假邮箱前缀)
+  KEY_PWD_HASH: 'beidanci_pwd_hash',     // 旧 SHA-256 哈希 (迁移校验兜底)
+  KEY_UID: 'beidanci_uid',               // Supabase Auth user_id (RLS 强隔离核心)
+  KEY_ACCESS_TOKEN: 'beidanci_access_token',   // JWT (业务请求 Authorization 头)
+  KEY_REFRESH_TOKEN: 'beidanci_refresh_token', // 刷新令牌 (access_token 过期后换新)
 
   // 默认用户名 (内部同步码字段)
   DEFAULT_SYNC_CODE: 'default',
@@ -84,6 +87,7 @@ App.Config = {
     TRIAL_DAYS: 7,                    // 试用期天数
     ADMIN_CODE: 'beidanci_admin',     // 管理员用户名（仅用于后台权限校验，非超级密钥）
     APP_SALT: 'bx_word_2026_salt_k3y',// 密码哈希加盐（仅用于本地哈希计算，即使暴露也无法单独解密密码）
+    EMAIL_DOMAIN: 'beidanci.local',   // 假邮箱域 (username → username@beidanci.local, 不发真实邮件)
     WECHAT_ID: '',                    // 捐赠联系微信 (稍后填写)
     WECHAT_QR: '',                    // 微信收款码图片路径 (稍后填写)
   },
@@ -92,6 +96,14 @@ App.Config = {
   YUNGOU: {
     // create-pay-order Edge Function 的 URL, 留空则只显示微信收款码(人工开通)
     CREATE_ORDER_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/create-pay-order',
+  },
+
+  // Edge Functions (v1.9.0 安全加固: Supabase Auth 迁移相关, 持有 service_role)
+  EDGE_FUNCTIONS: {
+    // 老用户首次登录自动迁移 (校验旧哈希 → 建 Auth 账号 → 回填 user_id)
+    MIGRATE_USER_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/migrate-user',
+    // 改密/找回密码 (同步更新 Supabase Auth bcrypt + user_auth 哈希)
+    UPDATE_PASSWORD_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/update-password',
   },
 
   // 密保问题选项
