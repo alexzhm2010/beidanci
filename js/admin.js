@@ -1,6 +1,6 @@
 /**
- * 管理员后台模块
- * 功能: 运营看板、用户管理(授权/吊销)、促销设置、留言管理
+ * 管理员后台模块 (v1.10.0 多 tab 重构)
+ * 功能: 运营看板、词库管理(预置词库CRUD)、用户管理、运营设置(促销+留言+系统信息)
  * 依赖: App.DB (rpc), App.Auth (管理员鉴权), App.Utils, Chart.js
  */
 window.App = window.App || {};
@@ -9,6 +9,14 @@ App.Admin = (function () {
   var cachedUsers = [];
   var cachedPromo = null;
   var cachedMessages = [];
+  var currentTab = 'dashboard';
+  var cachedPresetWords = [];
+  var cachedPresetStats = null;
+  // v1.10.0 用户管理增强: 分页 + 状态筛选
+  var userPage = 0;
+  var userPageSize = 50;
+  var userHasMore = false;
+  var userStatusFilter = 'all';
 
   // ========== 容器与鉴权 ==========
 
@@ -104,12 +112,14 @@ App.Admin = (function () {
     });
   }
 
-  // ========== 主入口 show ==========
+  // ========== 主入口 show (v1.10.0 多 tab 路由) ==========
 
-  async function show() {
+  async function show(tab) {
     if (!checkAuth()) return;
     var container = getContainer();
     if (!container) return;
+
+    currentTab = tab || 'dashboard';
 
     container.innerHTML = skeletonHtml();
 
@@ -123,11 +133,34 @@ App.Admin = (function () {
       });
     }
 
-    // 并行加载各模块数据
-    loadDashboardSection();
-    loadUsersSection();
-    loadPromoSection();
-    loadMessagesSection();
+    // tab 切换
+    var tabBtns = container.querySelectorAll('.admin-tab-btn');
+    tabBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var t = btn.getAttribute('data-tab');
+        currentTab = t;
+        // 更新 active 态
+        tabBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderTabContent(t);
+        localStorage.setItem(App.Config.KEY_LAST_TAB, t);
+      });
+    });
+
+    // 设置当前 tab active
+    tabBtns.forEach(function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-tab') === currentTab);
+    });
+
+    renderTabContent(currentTab);
+  }
+
+  async function renderTabContent(tab) {
+    destroyCharts();
+    if (tab === 'dashboard') loadDashboardSection();
+    else if (tab === 'wordbook') loadWordbookSection();
+    else if (tab === 'users') loadUsersSection();
+    else if (tab === 'settings') loadSettingsSection();
   }
 
   function skeletonHtml() {
@@ -137,34 +170,97 @@ App.Admin = (function () {
         '<span style="font-size:14px;color:var(--color-text-light);">当前管理员: <b>' + App.Utils.escapeHtml(adminName) + '</b></span>' +
         '<button class="btn btn-danger btn-sm" id="btnAdminLogout">退出登录</button>' +
       '</div>' +
-      '<div class="stats-section-title">运营看板</div>' +
-      '<div id="adminDashboard"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>' +
-      '<div class="stats-section-title" style="margin-top:24px;">用户管理</div>' +
-      '<div id="adminUsers"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>' +
-      '<div class="stats-section-title" style="margin-top:24px;">促销设置</div>' +
-      '<div id="adminPromo"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>' +
-      '<div class="stats-section-title" style="margin-top:24px;">留言管理</div>' +
-      '<div id="adminMessages"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>'
+      // v1.10.0 admin tab 栏
+      '<div class="admin-tabs" style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--color-border);">' +
+        '<button class="btn admin-tab-btn" data-tab="dashboard" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">看板</button>' +
+        '<button class="btn admin-tab-btn" data-tab="wordbook" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">词库</button>' +
+        '<button class="btn admin-tab-btn" data-tab="users" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">用户</button>' +
+        '<button class="btn admin-tab-btn" data-tab="settings" style="border:none;background:transparent;padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;">设置</button>' +
+      '</div>' +
+      '<div id="adminTabContent"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>'
     );
   }
 
   async function loadDashboardSection() {
+    var c = document.getElementById('adminTabContent');
+    if (!c) return;
+    c.innerHTML = '<div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div>';
     try {
       var data = await loadDashboard();
-      renderDashboard(data);
+      // v1.10.0 看板增强: 同时拉取用户列表用于"即将到期"快捷续费
+      var users = [];
+      try {
+        users = await loadUsers(0, 200);
+      } catch (e2) { /* 用户列表加载失败不阻塞看板 */ }
+      renderDashboard(data, users);
     } catch (e) {
-      showSectionError('adminDashboard', e.message);
+      showSectionError('adminTabContent', e.message);
     }
   }
 
   async function loadUsersSection() {
+    var c = document.getElementById('adminTabContent');
+    if (!c) return;
+    c.innerHTML = '<div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div>';
+    userPage = 0;
+    userStatusFilter = 'all';
     try {
-      var users = await loadUsers(0, 100);
-      cachedUsers = users || [];
+      await loadUsersPage(0);
       renderUserManagement();
     } catch (e) {
-      showSectionError('adminUsers', e.message);
+      showSectionError('adminTabContent', e.message);
     }
+  }
+
+  // v1.10.0 用户管理增强: 分页加载 (用 limit+1 检测是否有下一页)
+  async function loadUsersPage(page) {
+    var offset = page * userPageSize;
+    var users = await loadUsers(offset, userPageSize + 1);
+    users = users || [];
+    userHasMore = users.length > userPageSize;
+    if (userHasMore) users = users.slice(0, userPageSize);
+    cachedUsers = users;
+    userPage = page;
+  }
+
+  // v1.10.0 用户管理增强: 客户端状态筛选 (在当前页数据上过滤)
+  function filterUsersByStatus(users) {
+    if (userStatusFilter === 'all') return users;
+    return users.filter(function (u) {
+      var st = deriveUserStatus(u);
+      return st === userStatusFilter;
+    });
+  }
+
+  // 把 auth_status + expires_at 推导成业务状态: active/trial/expired/revoked/none
+  function deriveUserStatus(u) {
+    var st = u.auth_status || 'none';
+    if (st === 'revoked') return 'revoked';
+    if (st === 'active') {
+      var exp = u.expires_at;
+      if (exp === null || exp === undefined || exp === '') return 'active';
+      var ts = typeof exp === 'number' ? exp : new Date(exp).getTime();
+      if (!isNaN(ts) && ts < Date.now()) return 'expired';
+      return 'active';
+    }
+    if (st === 'none') {
+      // 无授权记录 = 试用中 (试用期由注册时间 + TRIAL_DAYS 判定, 这里简化为 trial)
+      return 'trial';
+    }
+    return 'none';
+  }
+
+  // v1.10.0 settings 页: 合并促销 + 留言 + 系统信息
+  async function loadSettingsSection() {
+    var c = document.getElementById('adminTabContent');
+    if (!c) return;
+    c.innerHTML =
+      '<div id="adminPromo"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>' +
+      '<div id="adminMessages" style="margin-top:24px;"><div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div></div>' +
+      '<div id="adminSystemInfo" style="margin-top:24px;"></div>';
+    loadPromoSection();
+    loadMessagesSection();
+    renderSystemInfo();
   }
 
   async function loadPromoSection() {
@@ -183,6 +279,19 @@ App.Admin = (function () {
     } catch (e) {
       showSectionError('adminMessages', e.message);
     }
+  }
+
+  function renderSystemInfo() {
+    var el = document.getElementById('adminSystemInfo');
+    if (!el) return;
+    var ver = (App.Config && App.Config.APP_VERSION) ? App.Config.APP_VERSION : '-';
+    el.innerHTML =
+      '<div class="stats-section-title">系统信息</div>' +
+      '<div class="chart-card">' +
+        '<div class="profile-row"><span class="profile-label">应用版本</span><span class="profile-value">v' + App.Utils.escapeHtml(ver) + '</span></div>' +
+        '<div class="profile-row"><span class="profile-label">预置词库</span><span class="profile-value">v1.10.0 已部署</span></div>' +
+        '<div class="profile-row"><span class="profile-label">认证方式</span><span class="profile-value">Supabase Auth + RLS</span></div>' +
+      '</div>';
   }
 
   // ========== 数据加载 (RPC) ==========
@@ -279,8 +388,8 @@ App.Admin = (function () {
 
   // ========== 渲染: 运营看板 ==========
 
-  function renderDashboard(data) {
-    var el = document.getElementById('adminDashboard');
+  function renderDashboard(data, usersData) {
+    var el = document.getElementById('adminTabContent');
     if (!el) return;
 
     destroyCharts();
@@ -290,6 +399,9 @@ App.Admin = (function () {
     var expiry = (data && data.expiry) || {};
     var monthlyDon = (data && data.monthly_donations) || [];
     var monthlyNew = (data && data.monthly_new_users) || [];
+
+    // v1.10.0 即将到期列表 (30天内到期 或 已过期未续费), 含快捷续费按钮
+    var expiringList = renderExpiryList(usersData || []);
 
     var html =
       // 营业额
@@ -316,6 +428,8 @@ App.Admin = (function () {
           cell(expiry.next_month, '下月到期', 'info') +
           cell(expiry.expired_not_renewed, '过期未续费', 'danger') +
         '</div>' +
+        // 即将到期用户清单 + 快捷续费
+        '<div id="adminExpiryList" style="margin-top:12px;">' + expiringList + '</div>' +
       '</div>' +
       // 图表
       '<div class="stats-charts">' +
@@ -325,6 +439,14 @@ App.Admin = (function () {
       '<div class="chart-card" style="margin-top:16px;"><h3>用户状态分布</h3><div class="chart-wrapper" style="height:200px;"><canvas id="adminStatusChart"></canvas></div></div>';
 
     el.innerHTML = html;
+
+    // 绑定快捷续费按钮
+    el.querySelectorAll('button[data-quickrenew]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var uname = btn.getAttribute('data-quickrenew');
+        handleQuickRenew(uname, btn);
+      });
+    });
 
     if (typeof Chart !== 'undefined') {
       renderRevenueChart(monthlyDon);
@@ -337,6 +459,55 @@ App.Admin = (function () {
         if (c && c.parentElement) c.parentElement.innerHTML = note;
       });
     }
+  }
+
+  // v1.10.0 即将到期用户清单 (30天内 或 已过期未吊销), 含快捷续费按钮 (按当前促销续期)
+  function renderExpiryList(usersData) {
+    var now = Date.now();
+    var in30 = now + 30 * 24 * 60 * 60 * 1000;
+    var expiring = [];
+    for (var i = 0; i < usersData.length; i++) {
+      var u = usersData[i];
+      var st = u.auth_status;
+      if (st !== 'active') continue;
+      var exp = u.expires_at;
+      if (exp === null || exp === undefined || exp === '') continue; // 永久授权不提醒
+      var ts = typeof exp === 'number' ? exp : new Date(exp).getTime();
+      if (isNaN(ts)) continue;
+      if (ts <= in30) { // 30天内到期 或 已过期
+        expiring.push({ username: u.username, expiresAt: ts, expired: ts < now });
+      }
+    }
+    expiring.sort(function (a, b) { return a.expiresAt - b.expiresAt; });
+    if (expiring.length === 0) {
+      return '<p style="color:var(--color-text-lighter);font-size:13px;text-align:center;padding:12px 0;">暂无 30 天内到期的用户</p>';
+    }
+    var html = '<div style="max-height:240px;overflow-y:auto;">';
+    for (var j = 0; j < expiring.length; j++) {
+      var e = expiring[j];
+      var tag = e.expired ? '已过期' : (Math.ceil((e.expiresAt - now) / (24 * 60 * 60 * 1000)) + '天后到期');
+      var tagColor = e.expired ? '#E74C3C' : '#F39C12';
+      html +=
+        '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--color-border-light);">' +
+          '<span style="font-size:13px;">' + App.Utils.escapeHtml(e.username) +
+            ' <span style="color:' + tagColor + ';font-size:12px;">(' + tag + ')</span></span>' +
+          '<button class="btn btn-success btn-sm" data-quickrenew="' + escapeAttr(e.username) + '">快捷续费</button>' +
+        '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // v1.10.0 快捷续费: 按当前促销配置直接续期 (调 admin_authorize, 不传 p_expires_at)
+  function handleQuickRenew(username, btn) {
+    App.showConfirm('确认按当前促销配置为 ' + username + ' 续期？', function () {
+      var orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '处理中...';
+      authorizeUser(username, '看板快捷续费')
+        .then(function () { return loadDashboardSection(); })
+        .catch(function (e) { App.showToast(e.message, 'error'); })
+        .then(function () { btn.disabled = false; btn.textContent = orig; });
+    });
   }
 
   function renderRevenueChart(monthlyDon) {
@@ -424,7 +595,7 @@ App.Admin = (function () {
   // ========== 渲染: 用户管理 ==========
 
   function renderUserManagement() {
-    var el = document.getElementById('adminUsers');
+    var el = document.getElementById('adminTabContent');
     if (!el) return;
 
     var html =
@@ -446,12 +617,27 @@ App.Admin = (function () {
         '<div class="form-group">' +
           '<input type="text" id="adminUserSearch" placeholder="搜索用户名..." style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' +
         '</div>' +
+        // v1.10.0 状态筛选
+        '<div class="form-group">' +
+          '<label>状态筛选</label>' +
+          '<select id="adminUserStatusFilter" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' +
+            '<option value="all"' + (userStatusFilter === 'all' ? ' selected' : '') + '>全部</option>' +
+            '<option value="active"' + (userStatusFilter === 'active' ? ' selected' : '') + '>已授权</option>' +
+            '<option value="trial"' + (userStatusFilter === 'trial' ? ' selected' : '') + '>试用中</option>' +
+            '<option value="expired"' + (userStatusFilter === 'expired' ? ' selected' : '') + '>已过期</option>' +
+            '<option value="revoked"' + (userStatusFilter === 'revoked' ? ' selected' : '') + '>已吊销</option>' +
+            '<option value="none"' + (userStatusFilter === 'none' ? ' selected' : '') + '>未授权</option>' +
+          '</select>' +
+        '</div>' +
         '<div id="adminUserList"></div>' +
+        // v1.10.0 分页控件
+        '<div id="adminUserPager" style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:16px;"></div>' +
       '</div>';
 
     el.innerHTML = html;
 
-    renderUserList(cachedUsers);
+    renderUserList(filterUsersByStatus(cachedUsers));
+    renderUserPager();
 
     document.getElementById('btnAdminQuery').addEventListener('click', function () {
       var username = (document.getElementById('adminAuthUsername').value || '').trim();
@@ -464,11 +650,54 @@ App.Admin = (function () {
     });
     document.getElementById('adminUserSearch').addEventListener('input', function () {
       var q = (this.value || '').trim().toLowerCase();
-      var filtered = cachedUsers.filter(function (u) {
+      var filtered = filterUsersByStatus(cachedUsers).filter(function (u) {
         return (u.username || '').toLowerCase().indexOf(q) !== -1;
       });
       renderUserList(filtered);
     });
+    document.getElementById('adminUserStatusFilter').addEventListener('change', function () {
+      userStatusFilter = this.value;
+      var q = (document.getElementById('adminUserSearch').value || '').trim().toLowerCase();
+      var filtered = filterUsersByStatus(cachedUsers);
+      if (q) {
+        filtered = filtered.filter(function (u) {
+          return (u.username || '').toLowerCase().indexOf(q) !== -1;
+        });
+      }
+      renderUserList(filtered);
+    });
+  }
+
+  // v1.10.0 分页控件渲染
+  function renderUserPager() {
+    var pager = document.getElementById('adminUserPager');
+    if (!pager) return;
+    var hasPrev = userPage > 0;
+    var html =
+      '<button class="btn btn-outline btn-sm" id="btnUserPrev" ' + (hasPrev ? '' : 'disabled style="opacity:0.4;cursor:not-allowed;"') + '>上一页</button>' +
+      '<span style="font-size:13px;color:var(--color-text-light);">第 ' + (userPage + 1) + ' 页</span>' +
+      '<button class="btn btn-outline btn-sm" id="btnUserNext" ' + (userHasMore ? '' : 'disabled style="opacity:0.4;cursor:not-allowed;"') + '>下一页</button>';
+    pager.innerHTML = html;
+    var prevBtn = document.getElementById('btnUserPrev');
+    var nextBtn = document.getElementById('btnUserNext');
+    if (prevBtn && hasPrev) {
+      prevBtn.addEventListener('click', function () { gotoUserPage(userPage - 1, prevBtn); });
+    }
+    if (nextBtn && userHasMore) {
+      nextBtn.addEventListener('click', function () { gotoUserPage(userPage + 1, nextBtn); });
+    }
+  }
+
+  async function gotoUserPage(page, btn) {
+    var origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '加载中...'; }
+    try {
+      await loadUsersPage(page);
+      renderUserManagement();
+    } catch (e) {
+      App.showToast('翻页失败: ' + e.message, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = origText; }
+    }
   }
 
   function handleQueryUser(username) {
@@ -526,6 +755,8 @@ App.Admin = (function () {
         '</div>' +
         '<div class="form-actions">' +
           '<button class="btn btn-success btn-sm" id="btnAdminAuthorize">授权</button>' +
+          '<button class="btn btn-primary btn-sm" id="btnAdminRenew">续费/改期</button>' +
+          '<button class="btn btn-outline btn-sm" id="btnAdminDetail">详情</button>' +
           '<button class="btn btn-danger btn-sm" id="btnAdminRevoke">吊销</button>' +
         '</div>' +
       '</div>';
@@ -535,6 +766,12 @@ App.Admin = (function () {
     document.getElementById('btnAdminAuthorize').addEventListener('click', function () {
       var note = document.getElementById('adminAuthNote').value || '';
       handleAuthorize(user.username, note, this);
+    });
+    document.getElementById('btnAdminRenew').addEventListener('click', function () {
+      showRenewModal(user.username);
+    });
+    document.getElementById('btnAdminDetail').addEventListener('click', function () {
+      showUserDetailModal(user.username);
     });
     document.getElementById('btnAdminRevoke').addEventListener('click', function () {
       handleRevoke(user.username, this);
@@ -568,7 +805,7 @@ App.Admin = (function () {
 
   async function refreshUsers() {
     try {
-      cachedUsers = await loadUsers(0, 100);
+      await loadUsersPage(userPage);
       renderUserManagement();
       // 授权状态变化也影响看板, 一并刷新
       loadDashboardSection();
@@ -600,8 +837,10 @@ App.Admin = (function () {
             '<div>注册：' + formatTs(u.created_at) + ' | 到期：' + formatTs(u.expires_at) + '</div>' +
             '<div>捐赠：' + money(u.total_donated) + ' (' + (u.donation_count || 0) + '次)</div>' +
           '</div>' +
-          '<div style="margin-top:8px;display:flex;gap:6px;">' +
+          '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">' +
+            '<button class="btn btn-outline btn-sm" data-act="detail" data-user="' + escapeAttr(u.username) + '">详情</button>' +
             '<button class="btn btn-success btn-sm" data-act="authorize" data-user="' + escapeAttr(u.username) + '">授权</button>' +
+            '<button class="btn btn-primary btn-sm" data-act="renew" data-user="' + escapeAttr(u.username) + '">续费/改期</button>' +
             '<button class="btn btn-danger btn-sm" data-act="revoke" data-user="' + escapeAttr(u.username) + '">吊销</button>' +
           '</div>' +
         '</div>';
@@ -618,10 +857,177 @@ App.Admin = (function () {
             handleAuthorize(uname, '', b);
           } else if (act === 'revoke') {
             handleRevoke(uname, b);
+          } else if (act === 'detail') {
+            showUserDetailModal(uname);
+          } else if (act === 'renew') {
+            showRenewModal(uname);
           }
         });
       })(btns[j]);
     }
+  }
+
+  // ========== v1.10.0 用户详情 + 续费/改期 ==========
+
+  // 调 admin_get_user_detail RPC 查询用户学习数据 (绕过 RLS, SECURITY DEFINER)
+  async function loadUserDetail(username) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_get_user_detail', {
+      p_admin_pwd_hash: hash,
+      p_username: username,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '加载用户详情失败');
+    return res;
+  }
+
+  // 用户详情弹窗: 展示词数/掌握度/复习记录/最近活跃
+  function showUserDetailModal(username) {
+    var body =
+      '<div id="userDetailContent" class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div>' +
+      '<div class="form-actions" style="margin-top:12px;">' +
+        '<button class="btn btn-outline" id="detailClose">关闭</button>' +
+      '</div>';
+    App.showModal('用户详情: ' + username, body);
+    document.getElementById('detailClose').addEventListener('click', App.hideModal);
+
+    loadUserDetail(username)
+      .then(function (d) { renderUserDetailContent(d); })
+      .catch(function (e) {
+        var el = document.getElementById('userDetailContent');
+        if (el) el.innerHTML = '<div class="stats-empty"><p style="color:var(--color-danger);">加载失败: ' +
+          App.Utils.escapeHtml(e.message) + '</p></div>';
+      });
+  }
+
+  function renderUserDetailContent(d) {
+    var el = document.getElementById('userDetailContent');
+    if (!el) return;
+    var migrated = d.migrated !== false;
+    var knownRate = (d.word_total > 0)
+      ? Math.round((d.word_known / d.word_total) * 100) + '%'
+      : '0%';
+    var lastActive = d.last_active ? formatTs(d.last_active) : '无记录';
+    var records = d.recent_records || [];
+
+    var recordsHtml = '';
+    if (records.length === 0) {
+      recordsHtml = '<p style="color:var(--color-text-lighter);font-size:13px;">暂无复习记录</p>';
+    } else {
+      recordsHtml = '<div style="max-height:200px;overflow-y:auto;">';
+      for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        var mark = r.is_known ? '✓' : '✗';
+        var color = r.is_known ? '#27AE60' : '#E74C3C';
+        recordsHtml +=
+          '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--color-border-light);font-size:13px;">' +
+            '<span>' + mark + ' ' + App.Utils.escapeHtml(r.word) +
+              ' <span style="color:var(--color-text-lighter);">(' + App.Utils.escapeHtml(r.direction || '') + ')</span></span>' +
+            '<span style="color:' + color + ';">' + formatTs(r.timestamp) + '</span>' +
+          '</div>';
+      }
+      recordsHtml += '</div>';
+    }
+
+    var html =
+      '<div class="chart-card">' +
+        '<div class="profile-row"><span class="profile-label">迁移状态</span><span class="profile-value">' +
+          (migrated ? '已迁移至 Supabase Auth' : '未迁移 (旧账号)') + '</span></div>' +
+        (d.user_id ? '<div class="profile-row"><span class="profile-label">用户ID</span><span class="profile-value" style="font-size:11px;word-break:break-all;">' + App.Utils.escapeHtml(d.user_id) + '</span></div>' : '') +
+      '</div>' +
+      '<div class="stats-dashboard" style="margin-top:12px;">' +
+        cell(d.word_total || 0, '词库总数', '') +
+        cell(d.word_known || 0, '已掌握', 'success') +
+        cell(knownRate, '掌握度', 'info') +
+        cell(d.records_total || 0, '复习次数', 'warning') +
+      '</div>' +
+      '<div class="chart-card" style="margin-top:12px;">' +
+        '<div class="profile-row"><span class="profile-label">最近活跃</span><span class="profile-value">' + lastActive + '</span></div>' +
+      '</div>' +
+      '<div class="chart-card" style="margin-top:12px;">' +
+        '<h3>最近 10 条复习记录</h3>' +
+        recordsHtml +
+      '</div>';
+
+    el.innerHTML = html;
+  }
+
+  // 续费/改期弹窗: 选到期日 → 调 admin_authorize(p_expires_at)
+  function showRenewModal(username) {
+    // 默认建议: 当前到期日 + 1 年, 或今天 + 1 年
+    var user = findUserInCache(username);
+    var suggestDate = new Date();
+    if (user && user.expires_at) {
+      var curExp = new Date(user.expires_at);
+      if (!isNaN(curExp.getTime())) suggestDate = curExp;
+    }
+    suggestDate.setFullYear(suggestDate.getFullYear() + 1);
+    var suggestVal = suggestDate.toISOString().slice(0, 10);
+
+    var body =
+      '<div class="form-group">' +
+        '<label>用户名</label>' +
+        '<p style="font-weight:600;font-size:15px;margin:4px 0;">' + App.Utils.escapeHtml(username) + '</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>到期日期 (留空 = 永久授权)</label>' +
+        '<input type="date" id="renewDate" value="' + suggestVal + '" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' +
+        '<p style="font-size:12px;color:var(--color-text-lighter);margin-top:4px;">指定到期日后, 将不走促销配置直接授权至该日期。</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>备注 (可选)</label>' +
+        '<input type="text" id="renewNote" placeholder="如: 微信转账续费1年" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' +
+      '</div>' +
+      '<div class="form-actions">' +
+        '<button class="btn btn-outline" id="renewCancel">取消</button>' +
+        '<button class="btn btn-primary" id="renewConfirm">确认续费</button>' +
+      '</div>';
+    App.showModal('续费/改期: ' + username, body);
+
+    document.getElementById('renewCancel').addEventListener('click', App.hideModal);
+    document.getElementById('renewConfirm').addEventListener('click', function () {
+      var dateStr = document.getElementById('renewDate').value;
+      var note = document.getElementById('renewNote').value || '';
+      var btn = this;
+      handleRenew(username, dateStr, note, btn);
+    });
+  }
+
+  function handleRenew(username, dateStr, note, btn) {
+    var expiresAt = null;
+    if (dateStr) {
+      // 日期字符串转 ISO 时间戳 (当天 23:59:59)
+      var d = new Date(dateStr + 'T23:59:59');
+      if (isNaN(d.getTime())) {
+        App.showToast('日期格式无效', 'error');
+        return;
+      }
+      expiresAt = d.toISOString();
+    }
+    var orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '处理中...';
+    authorizeWithExpiry(username, expiresAt, note)
+      .then(function (res) {
+        App.showToast('续费成功，到期：' + formatTs(res.expires_at), 'success');
+        App.hideModal();
+        return refreshUsers();
+      })
+      .catch(function (e) { App.showToast(e.message, 'error'); })
+      .then(function () { btn.disabled = false; btn.textContent = orig; });
+  }
+
+  // v1.10.0 调 admin_authorize 带 p_expires_at (指定到期日, 不走促销)
+  async function authorizeWithExpiry(username, expiresAt, note) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_authorize', {
+      p_admin_pwd_hash: hash,
+      p_username: username,
+      p_note: note || '',
+      p_expires_at: expiresAt,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '续费失败');
+    return res;
   }
 
   // ========== 渲染: 促销设置 ==========
@@ -809,6 +1215,382 @@ App.Admin = (function () {
         })
         .catch(function (e) { App.showToast(e.message, 'error'); })
         .then(function () { btn.disabled = false; btn.textContent = orig; });
+    });
+  }
+
+  // ========== v1.10.0 词库管理 (预置词库 CRUD + 批量导入) ==========
+
+  var STAGES = ['小学', '初中', '高中', '大学', '考研', '其他'];
+  var currentPresetStage = '小学';
+
+  async function loadWordbookSection() {
+    var c = document.getElementById('adminTabContent');
+    if (!c) return;
+    c.innerHTML = '<div class="stats-empty"><p style="color:var(--color-text-lighter);">加载中...</p></div>';
+    try {
+      // 并行加载: 学段统计 + 当前学段词列表
+      await loadPresetStats();
+      await loadPresetWords(currentPresetStage);
+      renderWordbookManage();
+    } catch (e) {
+      showSectionError('adminTabContent', e.message);
+    }
+  }
+
+  async function loadPresetStats() {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_preset_word_stats', { p_admin_pwd_hash: hash });
+    if (!res || !res.success) throw new Error((res && res.error) || '加载统计失败');
+    cachedPresetStats = res;
+  }
+
+  async function loadPresetWords(stage) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_list_preset_words', {
+      p_admin_pwd_hash: hash,
+      p_stage: stage,
+      p_offset: 0,
+      p_limit: 500,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '加载预置词失败');
+    cachedPresetWords = res.words || [];
+  }
+
+  async function addPresetWord(word, phonetic, pos, meaning, example, stage) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_add_preset_word', {
+      p_admin_pwd_hash: hash,
+      p_word: word, p_phonetic: phonetic, p_part_of_speech: pos,
+      p_chinese_meaning: meaning, p_example_sentence: example, p_stage: stage,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '新增失败');
+    return res;
+  }
+
+  async function updatePresetWord(id, word, phonetic, pos, meaning, example, stage) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_update_preset_word', {
+      p_admin_pwd_hash: hash, p_word_id: id,
+      p_word: word, p_phonetic: phonetic, p_part_of_speech: pos,
+      p_chinese_meaning: meaning, p_example_sentence: example, p_stage: stage,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '更新失败');
+    return res;
+  }
+
+  async function deletePresetWord(id) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_delete_preset_word', {
+      p_admin_pwd_hash: hash, p_word_id: id,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '删除失败');
+    return res;
+  }
+
+  async function batchAddPresetWords(words) {
+    var hash = getAdminHash();
+    if (!hash) throw new Error('无管理员权限');
+    var res = await App.DB.rpc('admin_batch_add_preset_words', {
+      p_admin_pwd_hash: hash,
+      p_words: words,
+    });
+    if (!res || !res.success) throw new Error((res && res.error) || '批量导入失败');
+    return res;
+  }
+
+  function renderWordbookManage() {
+    var el = document.getElementById('adminTabContent');
+    if (!el) return;
+
+    // 学段统计
+    var stats = (cachedPresetStats && cachedPresetStats.stats) || [];
+    var total = (cachedPresetStats && cachedPresetStats.total) || 0;
+    var statsHtml = '';
+    for (var i = 0; i < STAGES.length; i++) {
+      var s = STAGES[i];
+      var found = null;
+      for (var j = 0; j < stats.length; j++) {
+        if (stats[j].stage === s) { found = stats[j]; break; }
+      }
+      var cnt = found ? found.count : 0;
+      var isActive = s === currentPresetStage;
+      statsHtml +=
+        '<button class="btn ' + (isActive ? 'btn-primary' : 'btn-outline') + ' btn-sm preset-stage-btn" data-stage="' + s + '" style="margin:4px;">' +
+          s + ' (' + cnt + ')' +
+        '</button>';
+    }
+
+    var html =
+      '<div class="stats-section-title">预置词库管理</div>' +
+      // 学段统计 + 切换
+      '<div class="chart-card">' +
+        '<div style="margin-bottom:8px;font-size:13px;color:var(--color-text-light);">学段切换 (当前: <b>' + currentPresetStage + '</b>，总计 <b>' + total + '</b> 词)</div>' +
+        '<div>' + statsHtml + '</div>' +
+      '</div>' +
+      // 操作区
+      '<div class="chart-card" style="margin-top:12px;">' +
+        '<h3>单词管理</h3>' +
+        '<div class="form-actions" style="margin-bottom:12px;">' +
+          '<button class="btn btn-primary btn-sm" id="btnPresetAdd">单个新增</button>' +
+          '<button class="btn btn-outline btn-sm" id="btnPresetBatchImport">批量导入 (Excel)</button>' +
+        '</div>' +
+        // 词列表
+        '<div id="presetWordList"></div>' +
+      '</div>';
+
+    el.innerHTML = html;
+
+    renderPresetWordList();
+
+    // 学段切换
+    el.querySelectorAll('.preset-stage-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        currentPresetStage = btn.getAttribute('data-stage');
+        try {
+          await loadPresetWords(currentPresetStage);
+          renderWordbookManage();
+        } catch (e) {
+          App.showToast(e.message, 'error');
+        }
+      });
+    });
+
+    document.getElementById('btnPresetAdd').addEventListener('click', function () {
+      showPresetWordModal(null);
+    });
+    document.getElementById('btnPresetBatchImport').addEventListener('click', showPresetBatchImportModal);
+  }
+
+  function renderPresetWordList() {
+    var listEl = document.getElementById('presetWordList');
+    if (!listEl) return;
+    if (!cachedPresetWords || cachedPresetWords.length === 0) {
+      listEl.innerHTML = '<div class="stats-empty"><p>该学段暂无预置词</p></div>';
+      return;
+    }
+
+    var html =
+      '<div class="word-table-container" style="max-height:400px;overflow-y:auto;">' +
+        '<table class="word-table">' +
+          '<thead><tr><th>单词</th><th>音标</th><th>词性</th><th>中文释义</th><th>学段</th><th>操作</th></tr></thead>' +
+          '<tbody>';
+    for (var i = 0; i < cachedPresetWords.length; i++) {
+      var w = cachedPresetWords[i];
+      html +=
+        '<tr data-word-id="' + w.id + '">' +
+          '<td>' + App.Utils.escapeHtml(w.word) + '</td>' +
+          '<td>' + App.Utils.escapeHtml(w.phonetic || '') + '</td>' +
+          '<td>' + App.Utils.escapeHtml(w.part_of_speech || '') + '</td>' +
+          '<td>' + App.Utils.escapeHtml(w.chinese_meaning || '') + '</td>' +
+          '<td>' + App.Utils.escapeHtml(w.stage) + '</td>' +
+          '<td>' +
+            '<button class="btn btn-outline btn-sm btn-preset-edit">编辑</button> ' +
+            '<button class="btn btn-danger btn-sm btn-preset-del">删除</button>' +
+          '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table></div>';
+    listEl.innerHTML = html;
+
+    // 编辑/删除事件
+    listEl.querySelectorAll('tr[data-word-id]').forEach(function (tr) {
+      var id = tr.getAttribute('data-word-id');
+      tr.querySelector('.btn-preset-edit').addEventListener('click', function () {
+        var w = findPresetWordById(id);
+        if (w) showPresetWordModal(w);
+      });
+      tr.querySelector('.btn-preset-del').addEventListener('click', function () {
+        handleDeletePresetWord(id);
+      });
+    });
+  }
+
+  function findPresetWordById(id) {
+    for (var i = 0; i < cachedPresetWords.length; i++) {
+      if (cachedPresetWords[i].id === id) return cachedPresetWords[i];
+    }
+    return null;
+  }
+
+  function showPresetWordModal(word) {
+    var isEdit = !!word;
+    var w = word || { word: '', phonetic: '', part_of_speech: '', chinese_meaning: '', example_sentence: '', stage: currentPresetStage };
+    var stageOptions = STAGES.map(function (s) {
+      return '<option value="' + s + '"' + (s === w.stage ? ' selected' : '') + '>' + s + '</option>';
+    }).join('');
+
+    var body =
+      '<div class="form-group"><label>单词/词组</label>' +
+        '<input type="text" id="pmWord" value="' + escapeAttr(w.word) + '" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);"></div>' +
+      '<div class="form-group"><label>音标</label>' +
+        '<input type="text" id="pmPhonetic" value="' + escapeAttr(w.phonetic || '') + '" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);"></div>' +
+      '<div class="form-group"><label>词性</label>' +
+        '<input type="text" id="pmPos" value="' + escapeAttr(w.part_of_speech || '') + '" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);"></div>' +
+      '<div class="form-group"><label>中文释义</label>' +
+        '<input type="text" id="pmMeaning" value="' + escapeAttr(w.chinese_meaning || '') + '" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);"></div>' +
+      '<div class="form-group"><label>例句</label>' +
+        '<textarea id="pmExample" rows="2" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' + escapeAttr(w.example_sentence || '') + '</textarea></div>' +
+      '<div class="form-group"><label>学段</label>' +
+        '<select id="pmStage" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' + stageOptions + '</select></div>' +
+      '<div class="form-actions">' +
+        '<button class="btn btn-outline" id="pmCancel">取消</button>' +
+        '<button class="btn btn-primary" id="pmSave">' + (isEdit ? '保存' : '新增') + '</button>' +
+      '</div>';
+
+    App.showModal(isEdit ? '编辑预置词' : '新增预置词', body);
+
+    document.getElementById('pmCancel').addEventListener('click', App.hideModal);
+    document.getElementById('pmSave').addEventListener('click', function () {
+      var word2 = document.getElementById('pmWord').value.trim();
+      var phonetic = document.getElementById('pmPhonetic').value.trim();
+      var pos = document.getElementById('pmPos').value.trim();
+      var meaning = document.getElementById('pmMeaning').value.trim();
+      var example = document.getElementById('pmExample').value.trim();
+      var stage = document.getElementById('pmStage').value;
+
+      if (!word2) { App.showToast('请输入单词', 'error'); return; }
+      if (!meaning) { App.showToast('请输入中文释义', 'error'); return; }
+
+      var btn = this;
+      btn.disabled = true; btn.textContent = '保存中...';
+      var p;
+      if (isEdit) {
+        p = updatePresetWord(w.id, word2, phonetic, pos, meaning, example, stage);
+      } else {
+        p = addPresetWord(word2, phonetic, pos, meaning, example, stage);
+      }
+      p.then(function () {
+        App.showToast(isEdit ? '已更新' : '已新增', 'success');
+        App.hideModal();
+        return refreshPresetWords();
+      })
+      .catch(function (e) { App.showToast(e.message, 'error'); })
+      .then(function () { btn.disabled = false; btn.textContent = isEdit ? '保存' : '新增'; });
+    });
+  }
+
+  function handleDeletePresetWord(id) {
+    var w = findPresetWordById(id);
+    var name = w ? w.word : id;
+    App.showConfirm('确认删除预置词 "' + name + '"？', function () {
+      deletePresetWord(id)
+        .then(function () {
+          App.showToast('已删除', 'success');
+          return refreshPresetWords();
+        })
+        .catch(function (e) { App.showToast(e.message, 'error'); });
+    });
+  }
+
+  async function refreshPresetWords() {
+    await loadPresetStats();
+    await loadPresetWords(currentPresetStage);
+    renderWordbookManage();
+  }
+
+  function showPresetBatchImportModal() {
+    var body =
+      '<div class="form-group"><label>选择学段 (导入的词将归入此学段)</label>' +
+        '<select id="pmBatchStage" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' +
+          STAGES.map(function (s) {
+            return '<option value="' + s + '"' + (s === currentPresetStage ? ' selected' : '') + '>' + s + '</option>';
+          }).join('') +
+        '</select></div>' +
+      '<div class="form-group"><label>选择 Excel 文件</label>' +
+        '<input type="file" id="pmBatchFile" accept=".xlsx,.xls,.csv" style="width:100%;padding:10px;font-size:14px;"></div>' +
+      '<div class="form-group"><label>列说明 (表头需包含)</label>' +
+        '<p style="font-size:13px;color:var(--color-text-light);line-height:1.8;">' +
+          '单词: <b>单词/词组/word</b><br>' +
+          '音标: <b>音标/phonetic</b> (可选)<br>' +
+          '词性: <b>词性/partOfSpeech</b> (可选)<br>' +
+          '中文: <b>中文释义/中文/chineseMeaning</b><br>' +
+          '例句: <b>例句/example</b> (可选)' +
+        '</p></div>' +
+      '<div class="form-actions">' +
+        '<button class="btn btn-outline" id="pmBatchCancel">取消</button>' +
+        '<button class="btn btn-primary" id="pmBatchUpload">导入</button>' +
+      '</div>';
+
+    App.showModal('批量导入预置词', body);
+
+    document.getElementById('pmBatchCancel').addEventListener('click', App.hideModal);
+    document.getElementById('pmBatchUpload').addEventListener('click', function () {
+      var stage = document.getElementById('pmBatchStage').value;
+      var fileInput = document.getElementById('pmBatchFile');
+      if (!fileInput.files || !fileInput.files[0]) {
+        App.showToast('请选择文件', 'error');
+        return;
+      }
+      var btn = this;
+      btn.disabled = true; btn.textContent = '导入中...';
+      handlePresetBatchImport(fileInput.files[0], stage)
+        .then(function () { App.hideModal(); return refreshPresetWords(); })
+        .catch(function (e) { App.showToast(e.message, 'error'); })
+        .then(function () { btn.disabled = false; btn.textContent = '导入'; });
+    });
+  }
+
+  function handlePresetBatchImport(file, stage) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        try {
+          var data = new Uint8Array(e.target.result);
+          var workbook = XLSX.read(data, { type: 'array' });
+          var sheet = workbook.Sheets[workbook.SheetNames[0]];
+          var rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+          if (rows.length === 0) {
+            reject(new Error('文件无数据'));
+            return;
+          }
+
+          // 复用 library.js 的表头映射
+          var HEADER_MAP = {
+            '单词/词组': 'word', '单词': 'word', '词组': 'word', 'word': 'word', 'Word': 'word',
+            '音标': 'phonetic', 'phonetic': 'phonetic', 'Phonetic': 'phonetic',
+            '词性': 'part_of_speech', 'partOfSpeech': 'part_of_speech', 'pos': 'part_of_speech',
+            '中文译意': 'chinese_meaning', '中文释义': 'chinese_meaning', '中文': 'chinese_meaning',
+            'chineseMeaning': 'chinese_meaning', 'meaning': 'chinese_meaning', '释义': 'chinese_meaning',
+            '例句': 'example_sentence', 'exampleSentence': 'example_sentence', 'example': 'example_sentence',
+          };
+
+          var words = [];
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var obj = { stage: stage };
+            var keys = Object.keys(row);
+            for (var j = 0; j < keys.length; j++) {
+              var mapped = HEADER_MAP[keys[j]];
+              if (mapped) obj[mapped] = String(row[keys[j]] || '').trim();
+            }
+            if (obj.word && obj.chinese_meaning) {
+              words.push(obj);
+            }
+          }
+
+          if (words.length === 0) {
+            reject(new Error('未找到有效数据 (需含单词和中文释义列)'));
+            return;
+          }
+
+          batchAddPresetWords(words)
+            .then(function (res) {
+              App.showToast('导入成功: 新增 ' + res.inserted + ' 词 (重复已跳过)', 'success');
+              resolve();
+            })
+            .catch(function (e) { reject(e); });
+        } catch (err) {
+          reject(new Error('解析文件失败: ' + err.message));
+        }
+      };
+      reader.onerror = function () { reject(new Error('读取文件失败')); };
+      reader.readAsArrayBuffer(file);
     });
   }
 

@@ -49,6 +49,28 @@ App.updateSyncCodeBadge = function () {
   document.getElementById('syncCodeBadge').textContent = '用户名: ' + code + '  |  v' + ver;
 };
 
+// v1.10.0 admin 身份判断 (复用 auth.js 的 ADMIN_CODE 识别)
+App.isAdmin = function () {
+  var username = App.Auth.getCurrentUser();
+  return username === App.Config.AUTH.ADMIN_CODE;
+};
+
+// v1.10.0 admin 专属导航 (4 页: 看板/词库/用户/设置, 替代 学习/词库/统计/我的)
+App.initAdminNav = function () {
+  var nav = document.querySelector('.app-nav');
+  if (!nav) return;
+  nav.innerHTML =
+    '<button class="nav-btn active" data-tab="dashboard">看板</button>' +
+    '<button class="nav-btn" data-tab="wordbook">词库</button>' +
+    '<button class="nav-btn" data-tab="users">用户</button>' +
+    '<button class="nav-btn" data-tab="settings">设置</button>';
+  nav.querySelectorAll('.nav-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      App.switchTab(btn.dataset.tab);
+    });
+  });
+};
+
 App.switchTab = function (tabName) {
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
@@ -56,6 +78,18 @@ App.switchTab = function (tabName) {
   document.querySelectorAll('.view').forEach(function (view) {
     view.classList.remove('active');
   });
+
+  // v1.10.0: admin 走专属四页, 复用 profile 容器
+  if (App.isAdmin()) {
+    var adminContainer = document.getElementById('view-profile');
+    if (adminContainer) adminContainer.classList.add('active');
+    localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
+    if (App.Admin && typeof App.Admin.show === 'function') {
+      App.Admin.show(tabName);
+    }
+    return;
+  }
+
   var view = document.getElementById('view-' + tabName);
   if (view) view.classList.add('active');
 
@@ -89,8 +123,15 @@ App.initializeApp = async function () {
     await App.DB.init();
     App.updateSyncCodeBadge();
 
+    // v1.10.0: admin 登录后走专属四页, 普通用户恢复原导航
     var lastTab = localStorage.getItem(App.Config.KEY_LAST_TAB) || 'learning';
-    App.switchTab(lastTab);
+    if (App.isAdmin()) {
+      // admin: 导航由 Profile.showProfile 注入, 这里触发
+      App.Profile.showProfile();
+    } else {
+      // 普通用户: 确保导航是原 4 页 (admin 退出后可能残留)
+      App.switchTab(lastTab);
+    }
 
     console.log('背单词应用初始化完成 v' + App.Config.APP_VERSION);
   } catch (e) {
@@ -120,9 +161,15 @@ App.Profile = (function () {
     var username = App.Auth.getCurrentUser();
     if (!username) return;
 
-    // 管理员 → 显示管理后台
+    // 管理员 → 切换到 admin 专属导航 + 显示管理后台
     if (username === App.Config.AUTH.ADMIN_CODE) {
-      if (App.Admin) App.Admin.show();
+      App.initAdminNav();
+      // 恢复上次 admin tab, 默认看板
+      var lastTab = localStorage.getItem(App.Config.KEY_LAST_TAB) || 'dashboard';
+      if (['dashboard', 'wordbook', 'users', 'settings'].indexOf(lastTab) === -1) {
+        lastTab = 'dashboard';
+      }
+      App.switchTab(lastTab);
       return;
     }
 

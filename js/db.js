@@ -932,6 +932,14 @@ App.DB = (function () {
     });
   }
 
+  /** v1.10.0 同步预置词库到私有 words 表 (按学段递进 + "其他"补充包) */
+  async function syncPresetWords(stage, includeOther) {
+    return await rpc('sync_preset_words', {
+      p_stage: stage,
+      p_include_other: includeOther || false,
+    });
+  }
+
   // ========== 导出 ==========
 
   return {
@@ -988,5 +996,7 @@ App.DB = (function () {
     getPayOrderStatus: getPayOrderStatus,
     getUnreadMessages: getUnreadMessages,
     markMessageRead: markMessageRead,
+    // v1.10.0 预置词库
+    syncPresetWords: syncPresetWords,
   };
 })();

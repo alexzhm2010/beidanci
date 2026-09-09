@@ -32,6 +32,7 @@ App.Library = (function () {
     document.getElementById('btnAddWord').addEventListener('click', function () { showWordModal(); });
     document.getElementById('btnScanWord').addEventListener('click', showCameraScan);
     document.getElementById('btnExport').addEventListener('click', showExportModal);
+    document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
 
     // 表格事件委托 (编辑)
     document.getElementById('wordTableBody').addEventListener('click', function (e) {
@@ -1175,6 +1176,63 @@ App.Library = (function () {
       } catch (e) {
         App.showToast('导出失败: ' + e.message, 'error');
       }
+    });
+  }
+
+  // v1.10.0 同步预置词库弹窗 (普通用户选学段 → 调 sync_preset_words RPC)
+  function showSyncPresetModal() {
+    var stages = ['小学', '初中', '高中', '大学', '考研'];
+    var stageOptions = stages.map(function (s) {
+      return '<option value="' + s + '">' + s + '</option>';
+    }).join('');
+
+    var body =
+      '<div class="form-group"><label>选择学段 (含该学段及以下所有词)</label>' +
+        '<select id="syncStage" style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-card);">' + stageOptions + '</select>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">' +
+          '<input type="checkbox" id="syncOther" style="width:18px;height:18px;">' +
+          '<span>同时同步"其他"词汇 (无法归类的补充包)</span>' +
+        '</label>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<p style="font-size:13px;color:var(--color-text-light);line-height:1.6;">' +
+          '说明: 同步后单词会复制到你的私有词库，可在词库中自由增删改。<br>' +
+          '已存在的单词会跳过，不会覆盖你的学习进度。' +
+        '</p>' +
+      '</div>' +
+      '<div class="form-actions">' +
+        '<button class="btn btn-outline" id="syncCancel">取消</button>' +
+        '<button class="btn btn-primary" id="syncConfirm">同步</button>' +
+      '</div>';
+
+    App.showModal('同步预置词库', body);
+
+    document.getElementById('syncCancel').addEventListener('click', App.hideModal);
+    document.getElementById('syncConfirm').addEventListener('click', function () {
+      var stage = document.getElementById('syncStage').value;
+      var includeOther = document.getElementById('syncOther').checked;
+      var btn = this;
+      btn.disabled = true; btn.textContent = '同步中...';
+
+      App.DB.syncPresetWords(stage, includeOther)
+        .then(function (res) {
+          if (!res || !res.success) {
+            throw new Error((res && res.error) || '同步失败');
+          }
+          var msg = '同步成功: 新增 ' + res.inserted + ' 词';
+          if (res.skipped > 0) msg += '，跳过已存在 ' + res.skipped + ' 词';
+          App.showToast(msg, 'success');
+          App.hideModal();
+          loadWords(''); // 刷新词库列表
+        })
+        .catch(function (e) {
+          App.showToast('同步失败: ' + e.message, 'error');
+        })
+        .then(function () {
+          btn.disabled = false; btn.textContent = '同步';
+        });
     });
   }
 
