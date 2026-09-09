@@ -734,7 +734,13 @@ App.DB = (function () {
 
   /** 获取用户信息 (RPC, Profile 展示用, 不返回哈希) */
   async function getUserAuthInfo(username) {
-    return await rpc('get_user_auth_info', { p_username: username });
+    var result = await rpc('get_user_auth_info', { p_username: username });
+    if (!result) return null;
+    return {
+      username: result.username,
+      secQuestion: result.sec_question,
+      createdAt: result.created_at,
+    };
   }
 
   /** 修改密码 (RPC, 需原密码验证) */
