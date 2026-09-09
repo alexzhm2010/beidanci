@@ -201,8 +201,9 @@ input, textarea, select { font-family: inherit; outline: none; }
 .letter-stats-section .setting-label { display: block; margin-bottom: 10px; }
 .letter-stats-hint { font-size: 12px; color: var(--color-text-lighter); font-weight: 400; }
 .letter-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.letter-block { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 4px; border: 1.5px solid var(--color-border); border-radius: var(--radius); background: var(--color-card); transition: var(--transition); min-height: 56px; }
-.letter-block:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+.letter-block { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 4px; border: 1.5px solid var(--color-border); border-radius: var(--radius); background: var(--color-card); transition: var(--transition); min-height: 56px; cursor: pointer; }
+.letter-block:not(.is-empty):hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+.letter-block.is-empty { cursor: default; }
 .letter-head { font-size: 18px; font-weight: 700; color: var(--color-text); line-height: 1.2; }
 .letter-pct { font-size: 11px; font-weight: 500; color: var(--color-text-light); }
 .letter-count { font-size: 13px; color: var(--color-text-light); margin-top: 4px; font-variant-numeric: tabular-nums; }

@@ -28,6 +28,18 @@ App.Learning = (function () {
       var range = btn.dataset.range;
       startProficiencyReview(range);
     });
+
+    // 字母方块点击 -> 进入该字母未掌握单词复习
+    var letterGrid = document.getElementById('letterGrid');
+    if (letterGrid) {
+      letterGrid.addEventListener('click', function (e) {
+        var block = e.target.closest('.letter-block');
+        if (!block) return;
+        var letter = block.dataset.letter;
+        if (!letter) return;
+        startLetterReview(letter);
+      });
+    }
   }
 
   function bindToggleGroup(groupId, callback) {
@@ -113,7 +125,7 @@ App.Learning = (function () {
           pctText = ' <span class="letter-pct">(' + pct + '%)</span>';
         }
         html +=
-          '<div class="' + cls + '"' + style + '>' +
+          '<div class="' + cls + '" data-letter="' + ch + '"' + style + '>' +
             '<div class="letter-head">' + ch + pctText + '</div>' +
             '<div class="letter-count">' + s.unmastered + '/' + s.total + '</div>' +
           '</div>';
@@ -201,8 +213,45 @@ App.Learning = (function () {
     }
   }
 
-  /** 打开全屏熟练度复习窗口 */
-  function openProficiencyWindow(words, range) {
+  /** 按首字母启动未掌握单词复习 (复用熟练度复习弹窗) */
+  async function startLetterReview(letter) {
+    try {
+      var allWords = await App.DB.getLearnedWords();
+
+      var filtered = allWords.filter(function (w) {
+        if (!w.totalCount || w.totalCount === 0) return false;
+        var first = w.word.charAt(0).toUpperCase();
+        // letter === '#' 表示非 A-Z 开头
+        var match = letter === '#' ? !/[A-Z]/.test(first) : first === letter;
+        return match && w.knownCount / w.totalCount < 0.80;
+      });
+
+      if (filtered.length === 0) {
+        App.showToast('该字母暂无未掌握单词', 'warning');
+        return;
+      }
+
+      // 按熟练度从低到高排序 (与熟练度区间复习一致)
+      filtered.sort(function (a, b) {
+        var pa = a.knownCount / a.totalCount;
+        var pb = b.knownCount / b.totalCount;
+        return pa - pb;
+      });
+
+      var label = letter === '#' ? '#其他' : '字母 ' + letter;
+      openProficiencyWindow(filtered, null, label + ' 未掌握', renderLetterStats);
+    } catch (e) {
+      App.showToast('加载单词失败: ' + e.message, 'error');
+    }
+  }
+
+  /** 打开全屏熟练度复习窗口
+   * @param words    单词列表
+   * @param range    熟练度区间标识 (用于默认标题)
+   * @param customTitle 可选, 覆盖默认标题
+   * @param onClose  可选, 弹窗关闭后的回调
+   */
+  function openProficiencyWindow(words, range, customTitle, onClose) {
     var rangeLabels = {
       '0-40': '熟练度<40%',
       '40-60': '熟练度40~60%',
@@ -232,10 +281,12 @@ App.Learning = (function () {
       '</div>';
     }).join('');
 
+    var title = customTitle || rangeLabels[range] || '熟练度复习';
+
     overlay.innerHTML =
       '<div class="proficiency-window">' +
         '<div class="proficiency-header">' +
-          '<div class="proficiency-title">' + (rangeLabels[range] || '熟练度复习') + ' (' + words.length + '词)</div>' +
+          '<div class="proficiency-title">' + title + ' (' + words.length + '词)</div>' +
           '<button class="proficiency-close" id="profCloseBtn">&times;</button>' +
         '</div>' +
         '<div class="proficiency-progress">' +
@@ -342,6 +393,7 @@ App.Learning = (function () {
     function closeProficiencyWindow() {
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       document.body.style.overflow = '';
+      if (typeof onClose === 'function') onClose();
     }
   }
 
