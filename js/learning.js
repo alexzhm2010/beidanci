@@ -92,15 +92,35 @@ App.Learning = (function () {
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
       if (stats['#'].total > 0) keys.push('#');
 
+      // 颜色渐变: 按"未掌握占比" (未掌握+未学习新词) / 总数量, 0=全绿, 1=全红
+      // HSL: 红=0°, 绿=120°, 按占比线性插值色相
+      function ratioColor(total, mastered) {
+        if (total === 0) return null;
+        var ratio = (total - mastered) / total; // 0..1, 越大越差
+        var hue = (1 - ratio) * 120;            // 0%掌握->0°红, 100%掌握->120°绿
+        return 'hsl(' + hue + ', 70%, 88%)';   // 浅色背景
+      }
+      function ratioBorder(total, mastered) {
+        if (total === 0) return null;
+        var ratio = (total - mastered) / total;
+        var hue = (1 - ratio) * 120;
+        return 'hsl(' + hue + ', 65%, 52%)';   // 较深边框, 突出色阶
+      }
+
       var html = '';
       keys.forEach(function (ch) {
         var s = stats[ch];
         var cls = 'letter-block';
-        if (s.total === 0) cls += ' is-empty';
-        else if (s.unmastered === 0) cls += ' is-done';
-        else if (s.total > 0 && s.mastered / s.total < 0.5) cls += ' is-low';
+        var style = '';
+        if (s.total === 0) {
+          cls += ' is-empty';
+        } else {
+          var bg = ratioColor(s.total, s.mastered);
+          var bd = ratioBorder(s.total, s.mastered);
+          if (bg && bd) style = ' style="background:' + bg + ';border-color:' + bd + ';"';
+        }
         html +=
-          '<div class="' + cls + '">' +
+          '<div class="' + cls + '"' + style + '>' +
             '<div class="letter-head">' + ch + '</div>' +
             '<div class="letter-count">' + s.unmastered + '/' + s.total + '</div>' +
           '</div>';
