@@ -39,7 +39,7 @@ App.Stats = (function () {
       var newCount = total - learned;
       if (newCount < 0) newCount = 0;
       var mastered = learnedWords.filter(function (w) {
-        return w.totalCount && w.totalCount > 0 && w.knownCount / w.totalCount >= 0.85;
+        return w.totalCount && w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80;
       }).length;
 
       var words = learnedWords;
@@ -318,7 +318,7 @@ App.Stats = (function () {
         monthLearnedWords++;
       }
       if (w.lastKnownTime && w.lastKnownTime >= monthStart && w.lastKnownTime < monthEnd) {
-        if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.85) {
+        if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) {
           monthMasteredWords++;
         }
       }
