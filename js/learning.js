@@ -115,15 +115,18 @@ App.Learning = (function () {
         var s = stats[ch];
         var cls = 'letter-block';
         var style = '';
+        var pctText = '';
         if (s.total === 0) {
           cls += ' is-empty';
         } else {
           var hue = hueFor(s.total, s.mastered);
           style = ' style="background:hsl(' + hue + ',75%,90%);border-color:hsl(' + hue + ',70%,50%);"';
+          var pct = Math.round(((s.total - s.mastered) / s.total) * 100);
+          pctText = ' <span class="letter-pct">(' + pct + '%)</span>';
         }
         html +=
           '<div class="' + cls + '"' + style + '>' +
-            '<div class="letter-head">' + ch + '</div>' +
+            '<div class="letter-head">' + ch + pctText + '</div>' +
             '<div class="letter-count">' + s.unmastered + '/' + s.total + '</div>' +
           '</div>';
       });

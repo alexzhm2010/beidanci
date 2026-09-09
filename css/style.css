@@ -204,6 +204,7 @@ input, textarea, select { font-family: inherit; outline: none; }
 .letter-block { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 4px; border: 1.5px solid var(--color-border); border-radius: var(--radius); background: var(--color-card); transition: var(--transition); min-height: 56px; }
 .letter-block:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .letter-head { font-size: 18px; font-weight: 700; color: var(--color-text); line-height: 1.2; }
+.letter-pct { font-size: 11px; font-weight: 500; color: var(--color-text-light); }
 .letter-count { font-size: 13px; color: var(--color-text-light); margin-top: 4px; font-variant-numeric: tabular-nums; }
 .letter-block.is-empty { opacity: 0.45; }
 /* 颜色渐变由内联 style 注入 (HSL, 未掌握占比 0->绿, 1->红) */
