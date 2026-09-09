@@ -41,6 +41,56 @@ App.Learning = (function () {
     });
   }
 
+  // ========== 字母分布统计 ==========
+
+  /** 切到学习页时刷新字母分布 (与统计页"已掌握">=80%口径一致) */
+  async function show() {
+    await renderLetterStats();
+  }
+
+  async function renderLetterStats() {
+    var grid = document.getElementById('letterGrid');
+    if (!grid) return;
+    try {
+      var allWords = await App.DB.getAllWords();
+
+      // 26 个字母初始化 (A-Z)
+      var stats = {};
+      for (var i = 0; i < 26; i++) {
+        stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0 };
+      }
+
+      // 按首字母分组, 统计总数量与已掌握数
+      allWords.forEach(function (w) {
+        if (!w.word) return;
+        var letter = w.word.charAt(0).toUpperCase();
+        if (!stats[letter]) return; // 非 A-Z 开头跳过
+        stats[letter].total++;
+        if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) {
+          stats[letter].mastered++;
+        }
+      });
+
+      var html = '';
+      Object.keys(stats).forEach(function (ch) {
+        var s = stats[ch];
+        var unmastered = s.total - s.mastered;
+        var cls = 'letter-block';
+        if (s.total === 0) cls += ' is-empty';
+        else if (unmastered === 0) cls += ' is-done';
+        else if (s.total > 0 && s.mastered / s.total < 0.5) cls += ' is-low';
+        html +=
+          '<div class="' + cls + '">' +
+            '<div class="letter-head">' + ch + '</div>' +
+            '<div class="letter-count">' + unmastered + '/' + s.total + '</div>' +
+          '</div>';
+      });
+      grid.innerHTML = html;
+    } catch (e) {
+      grid.innerHTML = '<div class="letter-error">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
+    }
+  }
+
   // ========== 开始学习 ==========
 
   async function startNewWords() {
@@ -297,6 +347,8 @@ App.Learning = (function () {
     document.getElementById('learningCard').classList.add('hidden');
     document.querySelector('.settings-panel').classList.remove('hidden');
     document.querySelector('.action-buttons').classList.remove('hidden');
+    // 会话结束刷新字母分布, 反映最新熟练度
+    renderLetterStats();
   }
 
   // ========== 渲染卡片 ==========
@@ -446,5 +498,5 @@ App.Learning = (function () {
     document.getElementById('btnFinish').addEventListener('click', endSession);
   }
 
-  return { init: init, endSession: endSession };
+  return { init: init, show: show, endSession: endSession };
 })();

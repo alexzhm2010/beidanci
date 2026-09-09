@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#4A90D9">
   <meta name="format-detection" content="telephone=no">
   <title>背单词</title>
-  <link rel="stylesheet" href="css/style.css?v=1.7.8">
+  <link rel="stylesheet" href="css/style.css?v=1.7.9">
 </head>
 <body>
   <!-- 授权登录层 (覆盖整个页面) -->
@@ -73,6 +73,13 @@
             <button class="btn-toggle" data-range="40-60">40~60%</button>
             <button class="btn-toggle" data-range="60-80">60~80%</button>
             <button class="btn-toggle" data-range="80-100">80~100%</button>
+          </div>
+        </div>
+
+        <div class="letter-stats-section">
+          <label class="setting-label">字母分布 <span class="letter-stats-hint">（未掌握/总数量）</span></label>
+          <div class="letter-grid" id="letterGrid">
+            <div class="letter-loading">加载中...</div>
           </div>
         </div>
 
@@ -151,15 +158,15 @@
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 
   <!-- 应用脚本 -->
-  <script src="js/config.js?v=1.7.8"></script>
-  <script src="js/db.js?v=1.7.8"></script>
-  <script src="js/algorithm.js?v=1.7.8"></script>
-  <script src="js/dictionary.js?v=1.7.8"></script>
-  <script src="js/learning.js?v=1.7.8"></script>
-  <script src="js/library.js?v=1.7.8"></script>
-  <script src="js/stats.js?v=1.7.8"></script>
-  <script src="js/auth.js?v=1.7.8"></script>
-  <script src="js/admin.js?v=1.7.8"></script>
-  <script src="js/app.js?v=1.7.8"></script>
+  <script src="js/config.js?v=1.7.9"></script>
+  <script src="js/db.js?v=1.7.9"></script>
+  <script src="js/algorithm.js?v=1.7.9"></script>
+  <script src="js/dictionary.js?v=1.7.9"></script>
+  <script src="js/learning.js?v=1.7.9"></script>
+  <script src="js/library.js?v=1.7.9"></script>
+  <script src="js/stats.js?v=1.7.9"></script>
+  <script src="js/auth.js?v=1.7.9"></script>
+  <script src="js/admin.js?v=1.7.9"></script>
+  <script src="js/app.js?v=1.7.9"></script>
 </body>
 </html>

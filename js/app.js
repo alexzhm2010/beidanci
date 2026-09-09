@@ -61,7 +61,8 @@ App.switchTab = function (tabName) {
 
   localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
 
-  if (tabName === 'library' && App.Library) App.Library.show();
+  if (tabName === 'learning' && App.Learning) App.Learning.show();
+  else if (tabName === 'library' && App.Library) App.Library.show();
   else if (tabName === 'stats' && App.Stats) App.Stats.show();
   else if (tabName === 'profile' && App.Auth) App.Profile.showProfile();
 };
