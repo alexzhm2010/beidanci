@@ -90,6 +90,11 @@ App.switchTab = function (tabName) {
     return;
   }
 
+  // v1.10.0: 普通用户兜底 — lastTab 可能残留 admin 专属 tab (wordbook/users/settings),
+  // 这些 view 不存在, 会致页面空白。非法 tab 统一回退到 learning
+  var validUserTabs = ['learning', 'library', 'stats', 'profile'];
+  if (validUserTabs.indexOf(tabName) === -1) tabName = 'learning';
+
   var view = document.getElementById('view-' + tabName);
   if (view) view.classList.add('active');
 
