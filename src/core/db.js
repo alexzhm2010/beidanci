@@ -563,16 +563,26 @@ App.DB = (function () {
     return count;
   }
 
-  /** 获取已学习的单词 (total_count > 0) */
-  async function getLearnedWords(limit) {
+  /**
+   * 获取已学习的单词 (total_count > 0)
+   *
+   * opts.lightweight = true 时使用 select 投影, 跳过 phonetic/chinese_meaning/example_sentence 等大字段,
+   *   仅保留 due/upcoming/熟练度计算所需列 (id,word,total_count,known_count,next_review_at,stability,last_learn_time,last_known_time)
+   *   显著降低传输+解析开销; 复习弹窗等需要完整词数据的场景不传此选项
+   */
+  async function getLearnedWords(limit, opts) {
+    var lightweight = opts && opts.lightweight;
     // v1.11.1 TTL 缓存: 学习页字母分布 + 统计页熟练度饼图共用于同一份数据
-    var cacheKey = 'learnedWords:' + (limit || 'all');
+    var cacheKey = 'learnedWords:' + (limit || 'all') + (lightweight ? ':lite' : '');
     var cached = _cacheGet(cacheKey);
     if (cached) return cached;
 
     var uid = getUserId();
+    var select = lightweight
+      ? '&select=id,word,total_count,known_count,next_review_at,stability,last_learn_time,last_known_time'
+      : '';
     var base = 'user_id=eq.' + encodeURIComponent(uid) +
-      '&total_count=gt.0' +
+      '&total_count=gt.0' + select +
       '&order=last_learn_time.desc';
 
     if (!limit) {
@@ -595,6 +605,118 @@ App.DB = (function () {
     }
     _cacheSet(cacheKey, all);
     return all;
+  }
+
+  /**
+   * 字母分布聚合 (v1.11.2: 服务端聚合, 替代 getLearnedWords + 前端分桶)
+   *
+   * 优先调用 RPC get_letter_distribution, 返回 [{letter, total, mastered, unmastered}, ...]
+   * RPC 未部署/失败时降级到客户端聚合 (复用 getLearnedWords lightweight 投影)
+   */
+  async function getLetterDistribution() {
+    var cacheKey = 'letterDistribution';
+    var cached = _cacheGet(cacheKey);
+    if (cached) return cached;
+
+    try {
+      var data = await rpc('get_letter_distribution', {});
+      // RPC 返回可能是 JSON 数组或带 error 的对象
+      if (Array.isArray(data)) {
+        _cacheSet(cacheKey, data);
+        return data;
+      }
+      if (data && data.error) throw new Error(data.error);
+    } catch (e) {
+      // RPC 未部署: 静默降级到客户端计算
+      console.warn('[getLetterDistribution] RPC unavailable, falling back to client-side:', e.message);
+    }
+
+    // 降级: 前端按首字母分桶 (与 renderLetterStats 原逻辑一致)
+    var words = await getLearnedWords(undefined, { lightweight: true });
+    var stats = {};
+    for (var i = 0; i < 26; i++) stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
+    stats['#'] = { total: 0, mastered: 0, unmastered: 0 };
+    words.forEach(function (w) {
+      if (!w.word) return;
+      var letter = w.word.charAt(0).toUpperCase();
+      var key = stats[letter] ? letter : '#';
+      stats[key].total++;
+      if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
+      else stats[key].unmastered++;
+    });
+    var result = Object.keys(stats)
+      .filter(function (k) { return k !== '#'; })
+      .map(function (k) {
+        return { letter: k, total: stats[k].total, mastered: stats[k].mastered, unmastered: stats[k].unmastered };
+      });
+    if (stats['#'].total > 0) {
+      result.push({ letter: '#', total: stats['#'].total, mastered: stats['#'].mastered, unmastered: stats['#'].unmastered });
+    }
+    _cacheSet(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * 熟练度统计聚合 (v1.11.2: 服务端聚合)
+   *
+   * 优先调用 RPC get_proficiency_stats, 返回:
+   *   {total, new, learned, mastered, prof_dist: {0, 40, 60, 80}}
+   * RPC 未部署/失败时降级到客户端计算
+   */
+  async function getProficiencyStats() {
+    var cacheKey = 'proficiencyStats';
+    var cached = _cacheGet(cacheKey);
+    if (cached) return cached;
+
+    try {
+      var data = await rpc('get_proficiency_stats', {});
+      if (data && typeof data.total === 'number') {
+        // 兜底: 老版 RPC 可能不含 prof_dist, 客户端补算
+        if (!data.prof_dist) {
+          data.prof_dist = await _calcProfDist();
+        }
+        _cacheSet(cacheKey, data);
+        return data;
+      }
+      if (data && data.error) throw new Error(data.error);
+    } catch (e) {
+      console.warn('[getProficiencyStats] RPC unavailable, falling back to client-side:', e.message);
+    }
+
+    // 降级: 前端计数 + 4 档分布 (与 stats.js 原逻辑一致)
+    var words = await getLearnedWords(undefined, { lightweight: true });
+    var total = await getWordCount();
+    var learned = words.length;
+    var newCount = total - learned;
+    if (newCount < 0) newCount = 0;
+    var mastered = 0;
+    var profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };
+    words.forEach(function (w) {
+      if (!w.totalCount || w.totalCount === 0) return;
+      var p = w.knownCount / w.totalCount;
+      if (p >= 0.80) { mastered++; profDist[80]++; }
+      else if (p >= 0.60) profDist[60]++;
+      else if (p >= 0.40) profDist[40]++;
+      else profDist[0]++;
+    });
+    var result = { total: total, new: newCount, learned: learned, mastered: mastered, prof_dist: profDist };
+    _cacheSet(cacheKey, result);
+    return result;
+  }
+
+  // 客户端计算 4 档熟练度分布 (老版 RPC 无 prof_dist 时兜底)
+  async function _calcProfDist() {
+    var words = await getLearnedWords(undefined, { lightweight: true });
+    var profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };
+    words.forEach(function (w) {
+      if (!w.totalCount || w.totalCount === 0) return;
+      var p = w.knownCount / w.totalCount;
+      if (p >= 0.80) profDist[80]++;
+      else if (p >= 0.60) profDist[60]++;
+      else if (p >= 0.40) profDist[40]++;
+      else profDist[0]++;
+    });
+    return profDist;
   }
 
   /**
@@ -1036,6 +1158,9 @@ App.DB = (function () {
     getNewWordCount: getNewWordCount,
     getLearnedWordCount: getLearnedWordCount,
     getMasteredWordCount: getMasteredWordCount,
+    // v1.11.2 统计聚合 (服务端 RPC, 降级客户端)
+    getLetterDistribution: getLetterDistribution,
+    getProficiencyStats: getProficiencyStats,
     // 记录
     addRecord: addRecord,
     getRecords: getRecords,

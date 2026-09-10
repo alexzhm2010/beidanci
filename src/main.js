@@ -526,6 +526,17 @@ document.addEventListener('DOMContentLoaded', function () {
       } else {
         ['library', 'stats'].forEach(prefetchFeature); // learning 一般已是首屏
       }
+
+      // v1.11.2: idle 后台预取统计数据填充 30s TTL 缓存
+      // 已登录用户预热 getLetterDistribution / getProficiencyStats / getLearnedWords(lite),
+      // 切到学习页/统计页时直接命中缓存, 秒开
+      if (App.Auth && App.Auth.isLoggedIn && App.Auth.isLoggedIn() && App.DB) {
+        try {
+          App.DB.getLetterDistribution().catch(function () {});
+          App.DB.getProficiencyStats().catch(function () {});
+          App.DB.getLearnedWords(undefined, { lightweight: true }).catch(function () {});
+        } catch (e) { /* 预取失败静默 */ }
+      }
     });
   }
   // 延迟一点避免抢首屏资源

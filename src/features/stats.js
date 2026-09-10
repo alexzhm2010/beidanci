@@ -30,10 +30,10 @@ App.Stats = (function () {
   }
 
   /** v1.10.4 O(N) 预聚合: 一次遍历 records + words 构建所有索引 */
-  function buildAggregates(records, words) {
+  // v1.11.2: profDistOverride 为服务端聚合的 4 档分布时, 跳过 words 遍历 (O(W)→O(1))
+  function buildAggregates(records, words, profDistOverride) {
     dayBuckets = {};
     monthBuckets = {};
-    profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };
 
     // 1) records → 按天/月分桶 (O(N))
     for (var i = 0; i < records.length; i++) {
@@ -58,15 +58,20 @@ App.Stats = (function () {
       if (r.wordId) mb.wordIds[r.wordId] = true;
     }
 
-    // 2) words → 熟练度分布 (O(W))
-    for (var j = 0; j < words.length; j++) {
-      var w = words[j];
-      if (!w.totalCount || w.totalCount === 0) continue;
-      var p = w.knownCount / w.totalCount;
-      if (p < 0.4) profDist[0]++;
-      else if (p < 0.6) profDist[40]++;
-      else if (p < 0.8) profDist[60]++;
-      else profDist[80]++;
+    // 2) 熟练度分布: 优先用服务端聚合结果, 否则从 words 计算 (降级)
+    if (profDistOverride) {
+      profDist = profDistOverride;
+    } else {
+      profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };
+      for (var j = 0; j < words.length; j++) {
+        var w = words[j];
+        if (!w.totalCount || w.totalCount === 0) continue;
+        var p = w.knownCount / w.totalCount;
+        if (p < 0.4) profDist[0]++;
+        else if (p < 0.6) profDist[40]++;
+        else if (p < 0.8) profDist[60]++;
+        else profDist[80]++;
+      }
     }
   }
 
@@ -92,26 +97,27 @@ App.Stats = (function () {
       calendarState = { year: now.getFullYear(), month: now.getMonth() };
       yearlyState = { year: now.getFullYear() };
 
-      // 并行拉取: 单词数据 + 词库总数 + 当年学习记录 (三者无依赖, 并行减少等待)
+      // 并行拉取:
+      //   1. getProficiencyStats — 服务端聚合 total/new/learned/mastered + 4 档熟练度分布 (几十字节)
+      //   2. getLearnedWords(lightweight) — 仅 due/upcoming 计算需要, 跳过 example_sentence 等大字段
+      //   3. getRecords(yearStart) — 当年学习记录
       // 记录只拉取当年1月1日至今 (日历/近7天/月度/年度看板都只用到当年数据, 相比2年数据量减半)
       var yearStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0).getTime();
 
       var results = await Promise.all([
-        App.DB.getLearnedWords(),
-        App.DB.getWordCount().catch(function () { return 0; }),
+        App.DB.getProficiencyStats(),
+        App.DB.getLearnedWords(undefined, { lightweight: true }),
         App.DB.getRecords(yearStart).catch(function (e) { console.error('加载学习记录失败:', e); return []; }),
       ]);
 
-      var learnedWords = results[0];
-      var total = results[1] || 0;
+      var profStats = results[0] || { total: 0, new: 0, learned: 0, mastered: 0, prof_dist: { 0: 0, 40: 0, 60: 0, 80: 0 } };
+      var learnedWords = results[1] || [];
       var records = results[2] || [];
 
-      var learned = learnedWords.length;
-      var newCount = total - learned;
-      if (newCount < 0) newCount = 0;
-      var mastered = learnedWords.filter(function (w) {
-        return w.totalCount && w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80;
-      }).length;
+      var total = profStats.total || 0;
+      var newCount = profStats.new || 0;
+      var learned = profStats.learned || 0;
+      var mastered = profStats.mastered || 0;
 
       var words = learnedWords;
       var wordCounts = [total, newCount, learned, mastered];
@@ -119,8 +125,8 @@ App.Stats = (function () {
       cachedWords = words;
       cachedRecords = records;
 
-      // v1.10.4 O(N) 预聚合: 后续 streak/日历/年度看板/月度统计全部查表
-      buildAggregates(records, words);
+      // v1.10.4 O(N) 预聚合 + v1.11.2 profDist 来自服务端 (跳过 words 遍历)
+      buildAggregates(records, words, profStats.prof_dist);
 
       render(words, records, wordCounts);
     } catch (e) {

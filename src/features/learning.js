@@ -129,29 +129,28 @@ App.Learning = (function () {
     var grid = document.getElementById('letterGrid');
     if (!grid) return;
     try {
-      // 单一数据源: getLearnedWords (与统计页饼图同源, fetchAllPages 并发分页可靠)
-      // total/mastered/unmastered 全部来自同一份词列表, 保证 total = mastered + unmastered,
-      // 彻底避免双数据源丢词不一致导致 占比为负 等问题
-      var learnedWords = await App.DB.getLearnedWords();
+      // v1.11.2: 改用服务端聚合 getLetterDistribution (RPC 返回 27 桶, 仅几十字节)
+      //   替代 getLearnedWords 全量拉取 + 前端分桶, 大幅降低学习页加载耗时
+      //   RPC 未部署时 db.js 内部降级到客户端聚合, 行为不变
+      var dist = await App.DB.getLetterDistribution();
 
       // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词
-      var stats = { '#': { total: 0, mastered: 0, unmastered: 0 } };
+      var stats = {};
       for (var i = 0; i < 26; i++) {
         stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
       }
+      stats['#'] = { total: 0, mastered: 0, unmastered: 0 };
 
-      // 一次遍历同时统计 total / mastered / unmastered
-      //   - total       = 该字母开头的已学习词数
-      //   - mastered    = 熟练度 >= 80%
-      //   - unmastered  = 熟练度 < 80% (对应统计页饼图"已学习未掌握")
-      learnedWords.forEach(function (w) {
-        if (!w.word) return;
-        var letter = w.word.charAt(0).toUpperCase();
-        var key = stats[letter] ? letter : '#';
-        stats[key].total++;
-        if (w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
-        else stats[key].unmastered++;
-      });
+      // 合并 RPC 返回的桶 (只含 total > 0 的字母, 其余保留零值)
+      if (Array.isArray(dist)) {
+        dist.forEach(function (b) {
+          if (stats[b.letter]) {
+            stats[b.letter].total = b.total || 0;
+            stats[b.letter].mastered = b.mastered || 0;
+            stats[b.letter].unmastered = b.unmastered || 0;
+          }
+        });
+      }
 
       // 渲染顺序: A-Z, 最后追加"#其他" (仅当存在非 A-Z 词时)
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
