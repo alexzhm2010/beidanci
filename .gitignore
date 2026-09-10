@@ -9,6 +9,7 @@ local_config.json
 
 # 本地配置覆盖 (如需本地化 Supabase 配置/邮箱, 放这里)
 js/config.local.js
+src/core/config.local.js
 
 # 个人收款/微信二维码 (放本地 assets, 不入库)
 assets/wechat-qr.png

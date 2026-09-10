@@ -1,9 +1,76 @@
 /**
  * 词库模块
  * 功能: 搜索、批量导入、单个新增、导出备份、编辑/删除
+ *
+ * v1.11.0 ES Module 重构:
+ *   - 从 IIFE-on-window.App 改为 ES Module, 由 main.js 动态 import 加载 (按需懒加载)
+ *   - 保留 window.App.Library 命名空间, 业务模块内部 App.Library 引用不变
+ *   - 原 index.html 中 #view-library 的静态 HTML 迁移为本模块的 HTML_TEMPLATE, init() 时注入
+ *   - 第三方库改为按需懒加载: XLSX 走 ESM 动态 import('xlsx'), Tesseract.js 走动态 script 标签
  */
+// 词典模块随词库页一起加载 (添加/批量导入时查词用)
+import './dictionary.js';
 window.App = window.App || {};
 App.Library = (function () {
+  // #view-library 的内部 HTML (迁移自 index.html, init() 首次挂载时注入)
+  const HTML_TEMPLATE = `
+        <div class="library-toolbar">
+          <input type="text" id="searchInput" class="search-input" placeholder="搜索单词或中文释义...">
+          <div class="toolbar-buttons">
+            <button class="btn btn-outline" id="btnImport">批量导入</button>
+            <button class="btn btn-outline" id="btnAddWord" style="display:none;">单个新增</button>
+            <button class="btn btn-outline" id="btnScanWord">扫词加词</button>
+            <button class="btn btn-outline" id="btnExport">导出备份</button>
+            <button class="btn btn-primary" id="btnSyncPreset">同步预置词库</button>
+          </div>
+        </div>
+        <div class="library-info">
+          <span id="libraryWordCount">共 0 词</span>
+          <span id="librarySearchInfo"></span>
+        </div>
+        <div class="word-table-container" id="wordTableContainer">
+          <table class="word-table">
+            <thead>
+              <tr>
+                <th>单词/词组</th>
+                <th>音标</th>
+                <th>中文释义</th>
+                <th>熟练度</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="wordTableBody"></tbody>
+          </table>
+        </div>
+      `;
+
+  // ========== 第三方库按需懒加载 ==========
+  // XLSX (npm 包) — 走 ESM 动态 import, 首次使用时加载并缓存
+  var _XLSX = null;
+  async function ensureXLSX() {
+    if (_XLSX) return _XLSX;
+    var mod = await import('xlsx');
+    _XLSX = mod.default || mod;
+    return _XLSX;
+  }
+
+  // Tesseract.js v5 UMD — 无 ESM 构建, 走动态 script 标签加载
+  var _Tesseract = null;
+  async function ensureTesseract() {
+    if (_Tesseract) return _Tesseract;
+    // Tesseract.js v5 UMD — load via dynamic script tag (no ESM build available)
+    await new Promise(function (resolve, reject) {
+      if (window.Tesseract) { resolve(); return; }
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error('Tesseract.js 加载失败')); };
+      document.head.appendChild(s);
+    });
+    _Tesseract = window.Tesseract;
+    return _Tesseract;
+  }
+
   var currentQuery = '';
   var displayedCount = 0;
   var totalCount = 0;
@@ -21,6 +88,13 @@ App.Library = (function () {
   };
 
   function init() {
+    // 注入 HTML 模板 (首次挂载时)
+    var view = document.getElementById('view-library');
+    if (!view.dataset.mounted) {
+      view.innerHTML = HTML_TEMPLATE;
+      view.dataset.mounted = '1';
+    }
+
     // 搜索 (防抖)
     var debouncedSearch = App.Utils.debounce(function () {
       loadWords(document.getElementById('searchInput').value);
@@ -353,7 +427,8 @@ App.Library = (function () {
     });
   }
 
-  function parseExcel(file) {
+  async function parseExcel(file) {
+    var XLSX = await ensureXLSX();
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
       reader.onload = function (e) {
@@ -400,7 +475,8 @@ App.Library = (function () {
     });
   }
 
-  function downloadTemplate() {
+  async function downloadTemplate() {
+    var XLSX = await ensureXLSX();
     var data = [{
       '单词/词组': 'apple',
       '音标': '/ˈæp.əl/',
@@ -960,6 +1036,7 @@ App.Library = (function () {
 
   /** 使用 Tesseract.js 进行 OCR (自动选择 tessdata 来源 + 多策略识别) */
   async function runOCR(canvas, onProgress) {
+    var Tesseract = await ensureTesseract();
     if (typeof Tesseract === 'undefined') {
       throw new Error('OCR 引擎未加载，请检查网络');
     }
@@ -1148,6 +1225,7 @@ App.Library = (function () {
     document.getElementById('btnCancelExport').addEventListener('click', App.hideModal);
     document.getElementById('btnDoExport').addEventListener('click', async function () {
       try {
+        var XLSX = await ensureXLSX();
         var words = await App.DB.getAllWords();
         if (words.length === 0) {
           App.showToast('词库为空，无可导出数据', 'warning');
@@ -1242,3 +1320,6 @@ App.Library = (function () {
     loadWords: loadWords,
   };
 })();
+
+// ES Module 导出 (供 main.js 动态 import, 同时 window.App.Library 命名空间保留供业务模块使用)
+export default App.Library;

@@ -14,6 +14,15 @@ App.Stats = (function () {
   var monthBuckets = {};      // key: 'YYYY-MM' → { records: [], count, known, newWords: Set, wordIds: Set }
   var profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };  // 熟练度分布: <40/40-60/60-80/80+
 
+  // v1.11.0 ES Module 重构: Chart.js 按需动态加载 (取代 index.html 全局 <script>)
+  var _Chart = null;
+  async function ensureChart() {
+    if (_Chart) return _Chart;
+    var mod = await import('chart.js/auto');
+    _Chart = mod.default || mod;
+    return _Chart;
+  }
+
   function init() {
     // 统计模块无需绑定事件, 每次 show() 时刷新
   }
@@ -118,7 +127,8 @@ App.Stats = (function () {
     }
   }
 
-  function render(words, records, wordCounts) {
+  async function render(words, records, wordCounts) {
+    var Chart = await ensureChart();
     // 销毁旧图表
     Object.keys(charts).forEach(function (k) {
       if (charts[k]) { charts[k].destroy(); delete charts[k]; }
@@ -430,7 +440,8 @@ App.Stats = (function () {
 
   // ========== 年度看板 ==========
 
-  function renderYearlyChart() {
+  async function renderYearlyChart() {
+    var Chart = await ensureChart();
     if (typeof Chart === 'undefined') {
       var yc = document.getElementById('yearlyChart');
       if (yc) yc.parentElement.innerHTML = '<p style="text-align:center;color:var(--color-text-light);padding:40px 0;">图表库加载失败，请检查网络</p>';
@@ -564,7 +575,8 @@ App.Stats = (function () {
     return '坚持每天背单词，日积月累见成效！';
   }
 
-  function renderActivityChart(days) {
+  async function renderActivityChart(days) {
+    var Chart = await ensureChart();
     var ctx = document.getElementById('activityChart').getContext('2d');
     var labels = days.map(function (d) {
       var date = new Date(d.date);
@@ -602,7 +614,8 @@ App.Stats = (function () {
     });
   }
 
-  function renderProficiencyChart(dist) {
+  async function renderProficiencyChart(dist) {
+    var Chart = await ensureChart();
     var ctx = document.getElementById('proficiencyChart').getContext('2d');
     charts.proficiency = new Chart(ctx, {
       type: 'doughnut',
@@ -625,3 +638,5 @@ App.Stats = (function () {
 
   return { init: init, show: show };
 })();
+
+export default App.Stats;

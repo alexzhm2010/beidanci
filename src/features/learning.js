@@ -1,9 +1,67 @@
 /**
  * 学习模块
  * 功能: 英译中/中译英、新词学习、智能复习
+ *
+ * v1.11.0 ES Module 重构:
+ *   - 从 IIFE-on-window.App 改为 ES Module, 由 main.js 动态 import 加载 (按需懒加载)
+ *   - 保留 window.App.Learning 命名空间, 业务模块内部 App.Learning 引用不变
+ *   - 原 index.html 中 #view-learning 的静态 HTML 迁移为本模块的 HTML_TEMPLATE, init() 时注入
  */
 window.App = window.App || {};
 App.Learning = (function () {
+  // #view-learning 的内部 HTML (迁移自 index.html, init() 首次挂载时注入)
+  const HTML_TEMPLATE = `
+        <div class="settings-panel">
+          <div class="setting-group">
+            <label class="setting-label">学习模式</label>
+            <div class="btn-group" id="modeGroup">
+              <button class="btn-toggle active" data-mode="en2cn">英译中</button>
+              <button class="btn-toggle" data-mode="cn2en">中译英</button>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">新词数量</label>
+            <div class="btn-group" id="newCountGroup">
+              <button class="btn-toggle active" data-count="20">20</button>
+              <button class="btn-toggle" data-count="40">40</button>
+              <button class="btn-toggle" data-count="60">60</button>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">复习数量</label>
+            <div class="btn-group" id="reviewCountGroup">
+              <button class="btn-toggle active" data-count="30">30</button>
+              <button class="btn-toggle" data-count="60">60</button>
+              <button class="btn-toggle" data-count="90">90</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="action-buttons">
+          <button class="btn btn-primary btn-large" id="btnNewWords">新词学习</button>
+          <button class="btn btn-secondary btn-large" id="btnReview">智能复习</button>
+        </div>
+
+        <div class="proficiency-section">
+          <label class="setting-label">按熟练度复习</label>
+          <div class="btn-group proficiency-group" id="proficiencyGroup">
+            <button class="btn-toggle" data-range="0-40">&lt;40%</button>
+            <button class="btn-toggle" data-range="40-60">40~60%</button>
+            <button class="btn-toggle" data-range="60-80">60~80%</button>
+            <button class="btn-toggle" data-range="80-100">80~100%</button>
+          </div>
+        </div>
+
+        <div class="letter-stats-section">
+          <label class="setting-label">字母分布 <span class="letter-stats-hint">（未掌握/总数量）</span></label>
+          <div class="letter-grid" id="letterGrid">
+            <div class="letter-loading">加载中...</div>
+          </div>
+        </div>
+
+        <div id="learningCard" class="learning-card hidden"></div>
+      `;
+
   var state = {
     mode: 'en2cn',         // en2cn | cn2en
     newWordCount: 20,
@@ -12,6 +70,13 @@ App.Learning = (function () {
   };
 
   function init() {
+    // 注入 HTML 模板 (首次挂载时)
+    var view = document.getElementById('view-learning');
+    if (!view.dataset.mounted) {
+      view.innerHTML = HTML_TEMPLATE;
+      view.dataset.mounted = '1';
+    }
+
     // 模式切换
     bindToggleGroup('modeGroup', function (val) { state.mode = val; });
     bindToggleGroup('newCountGroup', function (val) { state.newWordCount = parseInt(val); });
@@ -585,3 +650,6 @@ App.Learning = (function () {
 
   return { init: init, show: show, endSession: endSession };
 })();
+
+// ES Module 导出 (供 main.js 动态 import, 同时 window.App.Learning 命名空间保留供业务模块使用)
+export default App.Learning;

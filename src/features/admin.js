@@ -18,6 +18,24 @@ App.Admin = (function () {
   var userHasMore = false;
   var userStatusFilter = 'all';
 
+  // v1.11.0 ES Module 重构: Chart.js 按需动态加载 (取代 index.html 全局 <script>)
+  var _Chart = null;
+  async function ensureChart() {
+    if (_Chart) return _Chart;
+    var mod = await import('chart.js/auto');
+    _Chart = mod.default || mod;
+    return _Chart;
+  }
+
+  // v1.11.0: XLSX 按需动态加载 (handlePresetBatchImport 批量导入预置词时使用)
+  var _XLSX = null;
+  async function ensureXLSX() {
+    if (_XLSX) return _XLSX;
+    var mod = await import('xlsx');
+    _XLSX = mod.default || mod;
+    return _XLSX;
+  }
+
   // ========== 容器与鉴权 ==========
 
   function getContainer() {
@@ -364,7 +382,8 @@ App.Admin = (function () {
 
   // ========== 渲染: 运营看板 ==========
 
-  function renderDashboard(data, usersData) {
+  async function renderDashboard(data, usersData) {
+    var Chart = await ensureChart();
     var el = document.getElementById('adminTabContent');
     if (!el) return;
 
@@ -486,7 +505,8 @@ App.Admin = (function () {
     });
   }
 
-  function renderRevenueChart(monthlyDon) {
+  async function renderRevenueChart(monthlyDon) {
+    var Chart = await ensureChart();
     var canvas = document.getElementById('adminRevenueChart');
     if (!canvas) return;
     var labels = monthlyDon.map(function (m) { return m.month; });
@@ -511,7 +531,8 @@ App.Admin = (function () {
     });
   }
 
-  function renderNewUsersChart(monthlyNew) {
+  async function renderNewUsersChart(monthlyNew) {
+    var Chart = await ensureChart();
     var canvas = document.getElementById('adminNewUsersChart');
     if (!canvas) return;
     var labels = monthlyNew.map(function (m) { return m.month; });
@@ -541,7 +562,8 @@ App.Admin = (function () {
     });
   }
 
-  function renderStatusChart(users) {
+  async function renderStatusChart(users) {
+    var Chart = await ensureChart();
     var canvas = document.getElementById('adminStatusChart');
     if (!canvas) return;
     charts.status = new Chart(canvas.getContext('2d'), {
@@ -1511,7 +1533,8 @@ App.Admin = (function () {
     });
   }
 
-  function handlePresetBatchImport(file, stage) {
+  async function handlePresetBatchImport(file, stage) {
+    var XLSX = await ensureXLSX();
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
       reader.onload = function (e) {
@@ -1586,3 +1609,5 @@ App.Admin = (function () {
     loadMessages: loadMessages,
   };
 })();
+
+export default App.Admin;

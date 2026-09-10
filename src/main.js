@@ -1,7 +1,25 @@
 /**
- * 主控制器
- * 功能: 应用初始化、路由切换、弹窗/提示工具函数
+ * 主控制器 & 入口 (v1.11.0 ES Module 重构)
+ *
+ * 重构说明 (v1.11.0):
+ *   - 从 app.js 改为 main.js, 作为 Vite 入口 (index.html <script type="module" src="/src/main.js">)
+ *   - 核心层 (config/algorithm/db/auth) 静态 import, 首屏即加载, 设置 window.App.*
+ *   - 功能页 (learning/library/stats/admin) 动态 import, 切到对应 tab 才加载, 实现按需加载
+ *   - Profile 保留在入口 (登录后立即需要, 不做懒加载)
+ *   - 第三方库 (Chart.js/XLSX/Tesseract) 由各功能模块自行动态加载, 不再走 index.html 全局 <script>
+ *
+ * 功能: 应用初始化、路由切换、弹窗/提示工具函数、我的页面
  */
+
+// ========== 核心层静态加载 (首屏必需, 设置 window.App.Config/Utils/DBConfig/Algorithm/DB/Auth) ==========
+import './core/config.js';
+import './core/algorithm.js';
+import './core/db.js';
+import './core/auth.js';
+
+// 样式 (Vite 处理, 产出合并到 dist/assets/)
+import '../css/style.css';
+
 window.App = window.App || {};
 
 // ========== 共享工具函数 ==========
@@ -71,7 +89,50 @@ App.initAdminNav = function () {
   });
 };
 
-App.switchTab = function (tabName) {
+// ========== v1.11.0 按需懒加载功能页 ==========
+// 已加载的功能模块缓存 (避免重复 import/init)
+var _loadedFeatures = {};
+
+/**
+ * 按需加载功能模块 (首次切到某 tab 时动态 import, 之后走缓存)
+ * 核心层 (config/db/auth/algorithm) 已静态加载, 此处只处理功能页
+ */
+async function ensureFeature(tab) {
+  if (_loadedFeatures[tab]) return;
+  _loadedFeatures[tab] = true; // 标记加载中, 防止并发重复 import
+  try {
+    switch (tab) {
+      case 'learning':
+        await import('./features/learning.js');
+        if (App.Learning && typeof App.Learning.init === 'function') App.Learning.init();
+        break;
+      case 'library':
+        await import('./features/library.js'); // library.js 内部 import './dictionary.js'
+        if (App.Library && typeof App.Library.init === 'function') App.Library.init();
+        break;
+      case 'stats':
+        await import('./features/stats.js');
+        if (App.Stats && typeof App.Stats.init === 'function') App.Stats.init();
+        break;
+      case 'dashboard':
+      case 'wordbook':
+      case 'users':
+      case 'settings':
+        // admin 4 个 tab 共用 admin.js, 只加载一次
+        if (!App.Admin) {
+          await import('./features/admin.js');
+        }
+        break;
+      // profile 不懒加载 (定义在本文件, 登录后立即需要)
+    }
+  } catch (e) {
+    _loadedFeatures[tab] = false; // 加载失败允许重试
+    console.error('[ensureFeature] 加载失败', tab, e);
+    App.showToast('页面加载失败: ' + (e && e.message ? e.message : String(e)), 'error');
+  }
+}
+
+App.switchTab = async function (tabName) {
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
   });
@@ -84,6 +145,8 @@ App.switchTab = function (tabName) {
     var adminContainer = document.getElementById('view-profile');
     if (adminContainer) adminContainer.classList.add('active');
     localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
+    // 按需加载 admin 模块 (首次切到任意 admin tab 时)
+    await ensureFeature(tabName);
     if (App.Admin && typeof App.Admin.show === 'function') {
       App.Admin.show(tabName);
     }
@@ -100,6 +163,9 @@ App.switchTab = function (tabName) {
 
   localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
 
+  // 按需加载功能模块 (首次切到该 tab 时动态 import + init)
+  await ensureFeature(tabName);
+
   if (tabName === 'learning' && App.Learning) App.Learning.show();
   else if (tabName === 'library' && App.Library) App.Library.show();
   else if (tabName === 'stats' && App.Stats) App.Stats.show();
@@ -111,7 +177,7 @@ App.switchTab = function (tabName) {
 App.initializeApp = async function () {
   // 检查协议: file:// 下 Web Worker 和 OCR 无法工作
   if (location.protocol === 'file:') {
-    App.showModal('⚠️ 警告', 
+    App.showModal('⚠️ 警告',
       '<div style="padding:20px 10px;line-height:1.8;">' +
       '<p style="color:#E74C3C;font-weight:bold;margin-bottom:10px;">您正在使用 file:// 协议打开页面</p>' +
       '<p style="color:#666;margin-bottom:10px;">扫词OCR功能需要通过 HTTP 服务器访问。</p>' +
@@ -123,7 +189,7 @@ App.initializeApp = async function () {
       '</div>'
     );
   }
-  
+
   try {
     await App.DB.init();
     App.updateSyncCodeBadge();
@@ -135,7 +201,7 @@ App.initializeApp = async function () {
       App.Profile.showProfile();
     } else {
       // 普通用户: 确保导航是原 4 页 (admin 退出后可能残留)
-      App.switchTab(lastTab);
+      await App.switchTab(lastTab);
     }
 
     console.log('背单词应用初始化完成 v' + App.Config.APP_VERSION);
@@ -145,7 +211,7 @@ App.initializeApp = async function () {
       document.getElementById('app').innerHTML =
         '<div style="padding:60px 20px;text-align:center;">' +
         '<h2 style="color:#E74C3C;margin-bottom:12px;">数据库未配置</h2>' +
-        '<p style="color:#666;line-height:1.8;">请在 <b>js/config.js</b> 中填写 Supabase 配置信息：</p>' +
+        '<p style="color:#666;line-height:1.8;">请在 <b>src/core/config.js</b> 中填写 Supabase 配置信息：</p>' +
         '<p style="color:#999;margin-top:8px;font-size:13px;line-height:1.8;">' +
           '1. 登录 supabase.com 创建项目<br>' +
           '2. 执行 supabase.sql 建表脚本<br>' +
@@ -159,7 +225,7 @@ App.initializeApp = async function () {
   }
 };
 
-// ========== 我的页面 ==========
+// ========== 我的页面 (保留在入口, 登录后立即需要) ==========
 
 App.Profile = (function () {
   async function showProfile() {
@@ -336,19 +402,14 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // 1. 初始化模块
-  App.Learning.init();
-  App.Library.init();
-  App.Stats.init();
-
-  // 2. 导航事件
+  // 1. 导航事件 (v1.11.0: 不再预初始化各功能模块, 切到 tab 时按需加载)
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       App.switchTab(btn.dataset.tab);
     });
   });
 
-  // 3. 弹窗关闭
+  // 2. 弹窗关闭
   document.getElementById('modalClose').addEventListener('click', App.hideModal);
   document.getElementById('modalOverlay').addEventListener('click', function (e) {
     if (e.target === this) App.hideModal();
@@ -357,7 +418,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (e.key === 'Escape') App.hideModal();
   });
 
-  // 4. 启动授权系统 (Auth.init 内部会在授权通过后调用 initializeApp)
+  // 3. 启动授权系统 (Auth.init 内部会在授权通过后调用 initializeApp)
   if (App.Auth && typeof App.Auth.init === 'function') {
     App.Auth.init();
   } else {

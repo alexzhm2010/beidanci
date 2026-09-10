@@ -14,6 +14,9 @@
  *   - lastLearnTime (ms): 上次学习时间戳
  *   - lastKnownTime (ms): 上次"认识"时间戳
  *   - knownCount / totalCount: 熟练度统计
+ *
+ * v1.11.0 ES Module 重构: 保留 window.App.Algorithm 命名空间, 由 main.js 静态 import 加载;
+ *   业务模块内部 App.Algorithm 引用不变 (运行时查找 window.App)
  */
 window.App = window.App || {};
 App.Algorithm = (function () {
@@ -333,3 +336,6 @@ App.Algorithm = (function () {
     getUpcomingCount: getUpcomingCount,
   };
 })();
+
+// ES Module 导出 (供 main.js 显式 import, 同时 window.App.Algorithm 命名空间保留供业务模块使用)
+export default App.Algorithm;

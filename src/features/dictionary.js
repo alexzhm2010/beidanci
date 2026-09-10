@@ -290,3 +290,5 @@ App.Dictionary = (function () {
 
   return { lookup: lookup, lookupBatch: lookupBatch };
 })();
+
+export default App.Dictionary;

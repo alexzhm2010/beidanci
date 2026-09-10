@@ -11,6 +11,9 @@
  *   - admin 保留旧机制 (verify_login + KEY_PWD_HASH), 不进 Supabase Auth
  *
  * 功能: 登录/注册/找回密码、授权检查、捐赠引导、管理员留言
+ *
+ * v1.11.0 ES Module 重构: 保留 window.App.Auth 命名空间, 由 main.js 静态 import 加载;
+ *   auth.js 注入 auth overlay HTML 的 _showOverlay/_showAuthCard 逻辑保持不变, 运行时查找 window.App
  */
 window.App = window.App || {};
 App.Auth = (function () {
@@ -677,3 +680,6 @@ App.Auth = (function () {
     getAdminPwdHash: getAdminPwdHash, changePasswordForm: changePasswordForm, changeSecQuestionForm: changeSecQuestionForm,
   };
 })();
+
+// ES Module 导出 (供 main.js 显式 import, 同时 window.App.Auth 命名空间保留供业务模块使用)
+export default App.Auth;

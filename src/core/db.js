@@ -8,6 +8,9 @@
  *
  * 通过 REST API (PostgREST) 操作云端数据库
  * 对外 API 与 IndexedDB 版本完全一致, 其他模块无需修改
+ *
+ * v1.11.0 ES Module 重构: 保留 window.App.DB 命名空间, 由 main.js 静态 import 加载;
+ *   业务模块内部 App.DB 引用不变 (运行时查找 window.App)
  */
 window.App = window.App || {};
 App.DB = (function () {
@@ -1000,3 +1003,6 @@ App.DB = (function () {
     syncPresetWords: syncPresetWords,
   };
 })();
+
+// ES Module 导出 (供 main.js 显式 import, 同时 window.App.DB 命名空间保留供业务模块使用)
+export default App.DB;
