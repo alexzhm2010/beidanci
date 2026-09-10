@@ -8,7 +8,10 @@
   <meta name="theme-color" content="#4A90D9">
   <meta name="format-detection" content="telephone=no">
   <title>背单词</title>
-  <!-- v1.11.0: CSS 由 main.js import, Vite 自动注入 (开发 HMR + 构建提取到 dist/assets/) -->
+  <!-- v1.11.1 性能优化: 预连接 Supabase 域名, 节省 DNS+TCP+TLS 握手 ~200ms -->
+  <link rel="preconnect" href="https://gjtjivmxxelnousbqmok.supabase.co" crossorigin>
+  <link rel="dns-prefetch" href="https://gjtjivmxxelnousbqmok.supabase.co">
+  <!-- v1.11.1 性能优化: CSS 由 main.js import, Vite 自动注入 (开发 HMR + 构建提取到 dist/assets/) -->
 </head>
 <body>
   <!-- 授权登录层 (覆盖整个页面) -->
@@ -31,7 +34,7 @@
       <button class="nav-btn" data-tab="profile">我的</button>
     </nav>
 
-    <!-- 主内容 (v1.11.0: 各 view 内容由对应功能模块按需注入, 首屏只加载框架) -->
+    <!-- 主内容 (v1.11.1: 各 view 内容由对应功能模块按需注入, 首屏只加载框架) -->
     <main class="app-main">
       <section id="view-learning" class="view active"></section>
       <section id="view-library" class="view"></section>
@@ -54,7 +57,7 @@
   <!-- 提示 -->
   <div id="toast" class="toast hidden"></div>
 
-  <!-- v1.11.0: Vite 入口模块, 第三方库 (Chart.js/XLSX/Tesseract) 由各功能模块按需动态加载 -->
+  <!-- v1.11.1: Vite 入口模块, 第三方库 (Chart.js/XLSX/Tesseract) 由各功能模块按需动态加载 -->
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

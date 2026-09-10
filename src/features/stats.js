@@ -15,11 +15,13 @@ App.Stats = (function () {
   var profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };  // 熟练度分布: <40/40-60/60-80/80+
 
   // v1.11.0 ES Module 重构: Chart.js 按需动态加载 (取代 index.html 全局 <script>)
+  // v1.11.1 性能优化: 改用 ./chart-setup.js 包装模块 (static named imports 让 Rollup tree-shake)
+  // 预期瘦身: chart.js chunk 207KB → ~120KB raw / 71KB → ~40KB gzip
   var _Chart = null;
   async function ensureChart() {
     if (_Chart) return _Chart;
-    var mod = await import('chart.js/auto');
-    _Chart = mod.default || mod;
+    var mod = await import('./chart-setup.js');
+    _Chart = mod.default;
     return _Chart;
   }
 
@@ -128,7 +130,8 @@ App.Stats = (function () {
   }
 
   async function render(words, records, wordCounts) {
-    var Chart = await ensureChart();
+    // v1.11.1 性能优化: 先把数据计算 + 纯文字仪表盘 + 日历等不依赖 Chart.js 的部分立即渲染
+    // chart-wrapper 区域先显示骨架, Chart.js import 完成后再初始化图表
     // 销毁旧图表
     Object.keys(charts).forEach(function (k) {
       if (charts[k]) { charts[k].destroy(); delete charts[k]; }
@@ -204,7 +207,7 @@ App.Stats = (function () {
     });
     var overallAccuracy = totalRecords > 0 ? Math.round((totalKnown / totalRecords) * 100) : 0;
 
-    // ---- 渲染 ----
+    // ---- 渲染 (v1.11.1: chart-wrapper 区域先显示骨架, Chart.js 加载后再初始化) ----
     var html =
       // ===== 整体进展 =====
       '<div class="stats-section-title">整体进展</div>' +
@@ -225,10 +228,10 @@ App.Stats = (function () {
           App.Utils.escapeHtml(getMessage(streak, todayCount, todayAccuracy, learned, total, mastered)) +
         '</p>' +
       '</div>' +
-      // 整体图表
+      // 整体图表 (chart-wrapper 内先放骨架, Chart.js 加载后填充)
       '<div class="stats-charts">' +
-        '<div class="chart-card"><h3>近7天学习量</h3><div class="chart-wrapper"><canvas id="activityChart"></canvas></div></div>' +
-        '<div class="chart-card"><h3>学习进度</h3><div class="chart-wrapper"><canvas id="proficiencyChart"></canvas></div></div>' +
+        '<div class="chart-card"><h3>近7天学习量</h3><div class="chart-wrapper"><div class="skeleton-cells"><div class="skeleton-box" style="height:180px;"></div></div><canvas id="activityChart" style="display:none;"></canvas></div></div>' +
+        '<div class="chart-card"><h3>学习进度</h3><div class="chart-wrapper"><div class="skeleton-cells"><div class="skeleton-box" style="height:180px;"></div></div><canvas id="proficiencyChart" style="display:none;"></canvas></div></div>' +
       '</div>' +
       // ===== 月度进展 =====
       '<div class="stats-section-title" style="margin-top:24px;">月度进展</div>' +
@@ -250,22 +253,13 @@ App.Stats = (function () {
             '<button class="btn btn-sm btn-outline" id="btnNextYear">&gt;</button>' +
           '</div>' +
         '</div>' +
-        '<div class="chart-wrapper" style="height:300px;"><canvas id="yearlyChart"></canvas></div>' +
+        '<div class="chart-wrapper" style="height:300px;"><div class="skeleton-cells"><div class="skeleton-box" style="height:260px;"></div></div><canvas id="yearlyChart" style="display:none;"></canvas></div>' +
       '</div>';
 
     document.getElementById('statsContent').innerHTML = html;
 
-    // 渲染日历
+    // 渲染日历 (不依赖 Chart.js, 立即执行)
     renderCalendar();
-
-    // 渲染年度看板
-    renderYearlyChart();
-
-    // 渲染图表
-    if (typeof Chart !== 'undefined') {
-      renderActivityChart(days);
-      renderProficiencyChart(dist);
-    }
 
     // 绑定年度导航
     document.getElementById('btnPrevYear').addEventListener('click', function () {
@@ -276,6 +270,26 @@ App.Stats = (function () {
       yearlyState.year++;
       renderYearlyChart();
     });
+
+    // v1.11.1: 异步加载 Chart.js, 完成后再渲染所有图表
+    // 这之前用户已能看到仪表盘 + 日历 + 月度统计 + 激励语, 体感"已加载"
+    try {
+      var Chart = await ensureChart();
+      // 隐藏骨架, 显示 canvas
+      document.querySelectorAll('#statsContent .chart-wrapper .skeleton-cells').forEach(function (el) { el.remove(); });
+      document.querySelectorAll('#statsContent canvas').forEach(function (el) { el.style.display = ''; });
+      // 渲染图表
+      renderActivityChart(days);
+      renderProficiencyChart(dist);
+      // 渲染年度看板
+      renderYearlyChart();
+    } catch (e) {
+      console.error('[stats] Chart.js 加载失败, 仅展示文字部分:', e);
+      // 失败时移除骨架, 显示占位文字
+      document.querySelectorAll('#statsContent .chart-wrapper .skeleton-cells').forEach(function (el) {
+        el.outerHTML = '<div style="padding:30px;text-align:center;color:var(--color-text-lighter);">图表暂不可用</div>';
+      });
+    }
   }
 
   // ========== 月度打卡日历 ==========

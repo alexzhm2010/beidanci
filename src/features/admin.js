@@ -19,11 +19,12 @@ App.Admin = (function () {
   var userStatusFilter = 'all';
 
   // v1.11.0 ES Module 重构: Chart.js 按需动态加载 (取代 index.html 全局 <script>)
+  // v1.11.1 性能优化: 改用 ./chart-setup.js 包装模块 (static named imports 让 Rollup tree-shake)
   var _Chart = null;
   async function ensureChart() {
     if (_Chart) return _Chart;
-    var mod = await import('chart.js/auto');
-    _Chart = mod.default || mod;
+    var mod = await import('./chart-setup.js');
+    _Chart = mod.default;
     return _Chart;
   }
 

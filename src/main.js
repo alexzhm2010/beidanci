@@ -92,6 +92,30 @@ App.initAdminNav = function () {
 // ========== v1.11.0 按需懒加载功能页 ==========
 // 已加载的功能模块缓存 (避免重复 import/init)
 var _loadedFeatures = {};
+// v1.11.1: 已开始 prefetch 的 tab (去重, 避免重复发起 import)
+var _prefetched = {};
+
+// v1.11.1 性能优化: 预取功能模块 (不触发 init, 只让浏览器下载 chunk 到缓存)
+// 用于 mouseenter 悬停预取 + requestIdleCallback 后台预取
+function prefetchFeature(tab) {
+  // 已加载完整功能则无需预取
+  if (_loadedFeatures[tab]) return;
+  if (_prefetched[tab]) return;
+  _prefetched[tab] = true;
+  try {
+    switch (tab) {
+      case 'learning': import('./features/learning.js'); break;
+      case 'library':  import('./features/library.js'); break;
+      case 'stats':    import('./features/stats.js'); break;
+      case 'dashboard':
+      case 'wordbook':
+      case 'users':
+      case 'settings':
+        if (!App.Admin) import('./features/admin.js');
+        break;
+    }
+  } catch (e) { /* 预取失败静默, 真正切换时会重试 */ }
+}
 
 /**
  * 按需加载功能模块 (首次切到某 tab 时动态 import, 之后走缓存)
@@ -132,24 +156,37 @@ async function ensureFeature(tab) {
   }
 }
 
+// v1.11.1 性能优化: 注入骨架屏到目标 view, 防止切 tab 时空白闪烁
+function showSkeletonInView(tabName) {
+  var view = document.getElementById('view-' + tabName);
+  if (!view) return;
+  // 若 view 已有内容则不覆盖 (admin 复用 view-profile, 防止误清)
+  if (view.children.length > 0) return;
+  var html = '<div class="skeleton-cells">' +
+    '<div class="skeleton-box"></div>'.repeat(6) +
+    '</div>';
+  view.innerHTML = html;
+}
+
+
 App.switchTab = async function (tabName) {
+  // v1.11.1 性能优化: 切换瞬间立即更新 nav active 态 (视觉反馈), 但不立即清空旧 view
+  // 旧 view 保留显示直到新 view 内容就绪, 避免空白闪烁
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
-  });
-  document.querySelectorAll('.view').forEach(function (view) {
-    view.classList.remove('active');
   });
 
   // v1.10.0: admin 走专属四页, 复用 profile 容器
   if (App.isAdmin()) {
-    var adminContainer = document.getElementById('view-profile');
-    if (adminContainer) adminContainer.classList.add('active');
     localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
-    // 按需加载 admin 模块 (首次切到任意 admin tab 时)
+    // v1.11.1: 先加载模块并让 Admin.show 注入内容, 再切 active 容器
     await ensureFeature(tabName);
+    var adminContainer = document.getElementById('view-profile');
     if (App.Admin && typeof App.Admin.show === 'function') {
-      App.Admin.show(tabName);
+      App.Admin.show(tabName); // Admin.show 内部会渲染内容到 view-profile
     }
+    document.querySelectorAll('.view').forEach(function (view) { view.classList.remove('active'); });
+    if (adminContainer) adminContainer.classList.add('active');
     return;
   }
 
@@ -158,19 +195,33 @@ App.switchTab = async function (tabName) {
   var validUserTabs = ['learning', 'library', 'stats', 'profile'];
   if (validUserTabs.indexOf(tabName) === -1) tabName = 'learning';
 
-  var view = document.getElementById('view-' + tabName);
-  if (view) view.classList.add('active');
-
   localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
 
-  // 按需加载功能模块 (首次切到该 tab 时动态 import + init)
+  // v1.11.1: 若目标 view 已有内容则立即切换 (零延迟)
+  var targetView = document.getElementById('view-' + tabName);
+  var targetHasContent = targetView && targetView.children.length > 0;
+
+  if (!targetHasContent) {
+    // 首次进入此 tab: 先注入骨架 (不切 active, 旧 view 暂时仍显示, 减少空白感)
+    showSkeletonInView(tabName);
+  }
+
+  // 加载功能模块 (首次切到该 tab 时动态 import + init)
   await ensureFeature(tabName);
 
+  // 调用对应 show() 让模块自己渲染内容
   if (tabName === 'learning' && App.Learning) App.Learning.show();
   else if (tabName === 'library' && App.Library) App.Library.show();
   else if (tabName === 'stats' && App.Stats) App.Stats.show();
   else if (tabName === 'profile' && App.Auth) App.Profile.showProfile();
+
+  // 内容就绪后再切 active (此时若 view 仍是骨架会被 show() 覆盖, 切换瞬间内容已就绪)
+  document.querySelectorAll('.view').forEach(function (view) {
+    view.classList.remove('active');
+  });
+  if (targetView) targetView.classList.add('active');
 };
+
 
 // ========== 应用初始化 ==========
 
@@ -346,6 +397,8 @@ document.addEventListener('DOMContentLoaded', function () {
   // }
 
   // 0.1 清理 AxureShow 可能注入的浮层元素
+  // v1.11.1 性能优化: 改用 MutationObserver 监听 body 子节点新增, 命中 Axure 浮层立即清除
+  // 原方案 setInterval 每 2s 全量 querySelectorAll(8 个选择器) 持续触发 reflow
   function cleanAxureFloats() {
     var selectors = [
       '[class*="axure"]', '[id*="axure"]',
@@ -366,8 +419,38 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
   cleanAxureFloats();
-  // 定期清理 (AxureShow 可能在页面加载后延迟注入)
-  setInterval(cleanAxureFloats, 2000);
+
+  // v1.11.1: 监听 body 子节点新增, 命中浮层立即清除, 30 秒后自动停 (AxureShow 在前 30s 注入)
+  if (typeof MutationObserver !== 'undefined') {
+    var axureObserver = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (node.nodeType !== 1) continue;
+          // 命中浮层关键字则清除 (跳过应用自身 #app 内的节点)
+          if (node.id && node.id.indexOf && (node.id.indexOf('axure') >= 0 || node.id.indexOf('jubao') >= 0 || node.id.indexOf('float-btn') >= 0 || node.id.indexOf('toolbar-feedback') >= 0)) {
+            if (!node.closest('#app')) { node.remove(); continue; }
+          }
+          var cls = (typeof node.className === 'string') ? node.className : '';
+          if (cls && (cls.indexOf('axure') >= 0 || cls.indexOf('jubao') >= 0 || cls.indexOf('float-btn') >= 0 || cls.indexOf('toolbar-feedback') >= 0)) {
+            if (!node.closest('#app')) { node.remove(); continue; }
+          }
+          // iframe[src*=axure]
+          if (node.tagName === 'IFRAME' && node.getAttribute && (node.getAttribute('src') || '').indexOf('axure') >= 0) {
+            node.remove(); continue;
+          }
+        }
+      }
+    });
+    axureObserver.observe(document.body, { childList: true, subtree: false });
+    // 30s 后 AxureShow 已稳定, 关闭 observer 释放资源
+    setTimeout(function () { axureObserver.disconnect(); axureObserver = null; }, 30000);
+  } else {
+    // 老浏览器降级: 维持轮询但只跑 30 秒
+    var axureInterval = setInterval(cleanAxureFloats, 2000);
+    setTimeout(function () { clearInterval(axureInterval); }, 30000);
+  }
 
   // 0.2 移动端自动全屏引导
   function isMobile() {
@@ -403,9 +486,15 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // 1. 导航事件 (v1.11.0: 不再预初始化各功能模块, 切到 tab 时按需加载)
+  // v1.11.1: nav-btn mouseenter 触发 prefetchFeature, 用户悬停 200ms 内即下载 chunk
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
+    var tab = btn.dataset.tab;
+    // 桌面端悬停预取
+    btn.addEventListener('pointerover', function () {
+      if (tab) prefetchFeature(tab);
+    });
     btn.addEventListener('click', function () {
-      App.switchTab(btn.dataset.tab);
+      App.switchTab(tab);
     });
   });
 
@@ -424,4 +513,40 @@ document.addEventListener('DOMContentLoaded', function () {
   } else {
     App.initializeApp();
   }
+
+  // v1.11.1 性能优化: 空闲时间后台预取其他 tab 的 chunk
+  // 在首屏初始化完成后 (Auth.init 是 async, 不阻塞), 利用 idle 时机把常用 chunk 拉到浏览器缓存
+  // 移动端 idle 不稳定, requestIdleCallback 兜底 setTimeout
+  function scheduleIdlePrefetch() {
+    var schedule = window.requestIdleCallback || function (cb) { return setTimeout(cb, 1500); };
+    schedule(function () {
+      // admin 用户预取 admin 模块, 普通用户预取 learning 之外的 tab
+      if (App.isAdmin()) {
+        ['dashboard', 'wordbook', 'users', 'settings'].forEach(prefetchFeature);
+      } else {
+        ['library', 'stats'].forEach(prefetchFeature); // learning 一般已是首屏
+      }
+    });
+  }
+  // 延迟一点避免抢首屏资源
+  setTimeout(scheduleIdlePrefetch, 2000);
+
+  // v1.11.1 性能优化: 注册 Service Worker (Stale-While-Revalidate 缓存策略)
+  // 仅在 https / localhost 部署环境注册 (file:// 或非安全上下文不支持)
+  // GitHub Pages 是 HTTPS, 部署在子路径如 /beidanci/, sw.js 与 index.html 同目录
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    // 用相对路径解析, 兼容子路径部署
+    var swUrl = new URL('sw.js', document.baseURI).href;
+    // scope 用当前页面所在目录 (与 sw.js 同目录)
+    var swScope = new URL('.', document.baseURI).href;
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register(swUrl, { scope: swScope }).then(function (reg) {
+        // 注册成功 (静默, 不打扰用户)
+      }).catch(function (err) {
+        // 注册失败 (如非 HTTPS, 或老浏览器), 静默降级, 应用照常运行
+        console.warn('[SW] 注册失败, 应用照常运行 (无离线缓存):', err.message);
+      });
+    });
+  }
+
 });

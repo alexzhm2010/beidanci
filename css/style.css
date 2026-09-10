@@ -18,7 +18,19 @@
   --radius-sm: 4px;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 4px 20px rgba(0, 0, 0, 0.12);
-  --transition: all 0.2s ease;
+  /* v1.11.1: 精确属性过渡, 避免 transition: all 触发不必要的 repaint */
+  --transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+  --transition-transform: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+/* v1.11.1: 尊重用户的减少动画偏好 (省电 + 减少动效敏感) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 [class*="axure"], [id*="axure"], [class*="report"], [id*="report"], [class*="comment"], [id*="comment"], [class*="jubao"], [id*="jubao"], [class*="float-btn"], [id*="float-btn"], [class*="toolbar-feedback"], [id*="toolbar-feedback"] { display: none !important; }
@@ -396,3 +408,14 @@ input, textarea, select { font-family: inherit; outline: none; }
 .camera-loading-inner p { margin-top: 16px; font-size: 15px; }
 .camera-spinner { width: 40px; height: 40px; margin: 0 auto; border: 3px solid rgba(255,255,255,0.2); border-top-color: #fff; border-radius: 50%; animation: cameraSpin 0.8s linear infinite; }
 @keyframes cameraSpin { to { transform: rotate(360deg); } }
+
+/* v1.11.1 性能优化: 通用骨架屏, 数据加载前占位, 避免页面空白闪烁 */
+.skeleton-box { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: skeletonShimmer 1.4s ease-in-out infinite; border-radius: var(--radius-sm); display: inline-block; min-height: 16px; }
+@keyframes skeletonShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.skeleton-text { padding: 14px 20px; color: var(--color-text-lighter); font-size: 14px; text-align: center; }
+.skeleton-text .skeleton-box { width: 80%; height: 14px; }
+.skeleton-cells { padding: 20px; }
+.skeleton-cells .skeleton-box { width: 100%; height: 36px; margin-bottom: 10px; }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-box { animation: none; background: #f0f0f0; }
+}

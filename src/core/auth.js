@@ -127,15 +127,29 @@ App.Auth = (function () {
     if (isLoggedIn()) {
       var username = localStorage.getItem(CFG.KEY_USERNAME);
       try {
-        // admin: 旧机制恢复 (无 JWT, 用 verify_login 校验 KEY_PWD_HASH)
+        // admin: 旧机制恢复 (无 JWT, 必须用 verify_login 校验 KEY_PWD_HASH, 同步等待)
         if (username === AUTH.ADMIN_CODE) {
           var adminPwdHash = localStorage.getItem(CFG.KEY_PWD_HASH);
           var adminResult = await App.DB.verifyLogin(username, adminPwdHash);
           if (adminResult.success) { await _afterLoginSuccess(username); return; }
         } else if (App.DB.getUserId() && App.DB.getAccessToken()) {
-          // 普通用户: 本地有 JWT → 直接进应用
-          // (access_token 过期时由 db.js 在 401 时自动用 refresh_token 刷新, 无需在此校验)
-          await _afterLoginSuccess(username);
+          // v1.11.1 性能优化: 普通用户本地有 JWT 时, 不再阻塞首屏等 checkAuth RPC
+          // 立即 _startApp 渲染 app shell, checkAuth 后台异步校验
+          // access_token 过期由 db.js 在 401 时用 refresh_token 自动刷新
+          _hideOverlay();
+          _startApp();
+          // 后台校验授权状态 (失败再弹回捐赠/登录页)
+          checkAuth(username).then(function (status) {
+            if (status === 'authorized' || status === 'admin' || status === 'trial') {
+              showMessagesPopup(username);
+            } else {
+              // 授权失效 (过期/吊销), 弹回捐赠页
+              _appStarted = false; // 允许下次重新启动
+              showDonationPage();
+            }
+          }).catch(function (e) {
+            console.error('[Auth] 后台 checkAuth 失败, 维持当前会话 (401 时 db.js 会处理):', e);
+          });
           return;
         }
       } catch (e) { console.error('[Auth] init 会话恢复失败:', e); }

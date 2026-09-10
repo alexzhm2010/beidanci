@@ -15,6 +15,36 @@
 window.App = window.App || {};
 App.DB = (function () {
 
+  // ========== v1.11.1 性能优化: 读操作 TTL 缓存 ==========
+  // 减少 tab 切换时的重复 RPC (同一份数据在多个 tab 间复用)
+  // 30 秒过期, 任何写操作 (addWord/updateWord/deleteWord/addWordsBatch/addRecord) 立即失效
+  var CACHE_TTL_MS = 30000;
+  var _cache = {};
+
+  function _cacheGet(key) {
+    var entry = _cache[key];
+    if (!entry) return undefined;
+    if (Date.now() - entry.t > CACHE_TTL_MS) {
+      delete _cache[key];
+      return undefined;
+    }
+    return entry.v;
+  }
+
+  function _cacheSet(key, value) {
+    _cache[key] = { t: Date.now(), v: value };
+  }
+
+  // 失效所有缓存 (写操作后调用)
+  function invalidateCache() {
+    _cache = {};
+  }
+
+  // 失效指定 key (用于精确失效, 暂未使用, 保留接口)
+  function invalidate(key) {
+    delete _cache[key];
+  }
+
   // ========== UUID 生成 (兼容非 HTTPS 环境) ==========
   function _uuid() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -353,6 +383,7 @@ App.DB = (function () {
   async function addWord(word) {
     var row = wordToRow(word);
     var result = await api('POST', 'words', null, [row]);
+    invalidateCache(); // v1.11.1: 单词写操作后失效读缓存
     return rowToWord(result[0]);
   }
 
@@ -361,12 +392,14 @@ App.DB = (function () {
     word.updatedAt = Date.now();
     var row = wordToRow(word);
     var result = await api('PATCH', 'words', 'id=eq.' + encodeURIComponent(word.id), row);
+    invalidateCache(); // v1.11.1
     return rowToWord(result[0]);
   }
 
   /** 删除单词 */
   async function deleteWord(id) {
     await api('DELETE', 'words', 'id=eq.' + encodeURIComponent(id));
+    invalidateCache(); // v1.11.1
   }
 
   /** 按ID获取单词 */
@@ -469,15 +502,20 @@ App.DB = (function () {
 
   /** 获取单词总数 */
   async function getWordCount() {
+    // v1.11.1 TTL 缓存: 词库页/统计页/学习页均会读取, 避免重复 RPC
+    var cached = _cacheGet('wordCount');
+    if (cached !== undefined) return cached;
     var uid = getUserId();
     try {
       var resp = await api('GET', 'words',
         'user_id=eq.' + encodeURIComponent(uid) + '&limit=1',
         null, { returnResponse: true, count: 'exact' });
       var total = extractTotalFromRange(resp);
-      if (total > 0) return total;
+      if (total > 0) { _cacheSet('wordCount', total); return total; }
     } catch (e) {}
-    return await countByPaging('');
+    var totalByPaging = await countByPaging('');
+    _cacheSet('wordCount', totalByPaging);
+    return totalByPaging;
   }
 
   async function getNewWordCount() {
@@ -527,12 +565,21 @@ App.DB = (function () {
 
   /** 获取已学习的单词 (total_count > 0) */
   async function getLearnedWords(limit) {
+    // v1.11.1 TTL 缓存: 学习页字母分布 + 统计页熟练度饼图共用于同一份数据
+    var cacheKey = 'learnedWords:' + (limit || 'all');
+    var cached = _cacheGet(cacheKey);
+    if (cached) return cached;
+
     var uid = getUserId();
     var base = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' +
       '&order=last_learn_time.desc';
 
-    if (!limit) return await fetchAllPages('words', base, rowToWord);
+    if (!limit) {
+      var allUnbounded = await fetchAllPages('words', base, rowToWord);
+      _cacheSet(cacheKey, allUnbounded);
+      return allUnbounded;
+    }
 
     var PAGE = 1000;
     var offset = 0;
@@ -546,6 +593,7 @@ App.DB = (function () {
       if (rows.length < take) break;
       offset += take;
     }
+    _cacheSet(cacheKey, all);
     return all;
   }
 
@@ -641,6 +689,7 @@ App.DB = (function () {
       var batch = rowsToWrite.slice(i, i + BATCH);
       await api('POST', 'words', null, batch, { upsert: true });
     }
+    invalidateCache(); // v1.11.1: 批量导入后失效读缓存
     return rowsToWrite.length;
   }
 
@@ -649,16 +698,24 @@ App.DB = (function () {
   async function addRecord(record) {
     var row = recordToRow(record);
     await api('POST', 'records', null, [row]);
+    invalidateCache(); // v1.11.1: 学习记录写入后失效 records 缓存
     return rowToRecord(row);
   }
 
   async function getRecords(startDate, endDate) {
+    // v1.11.1 TTL 缓存: 统计页多次拉取同样区间, 避免重复 RPC
+    var cacheKey = 'records:' + (startDate || '') + ':' + (endDate || '');
+    var cached = _cacheGet(cacheKey);
+    if (cached) return cached;
+
     var uid = getUserId();
     var base = 'user_id=eq.' + encodeURIComponent(uid);
     if (startDate) base += '&timestamp=gte.' + startDate;
     if (endDate) base += '&timestamp=lt.' + endDate;
     base += '&order=timestamp.desc';
-    return await fetchAllPages('records', base, rowToRecord);
+    var result = await fetchAllPages('records', base, rowToRecord);
+    _cacheSet(cacheKey, result);
+    return result;
   }
 
   async function getAllRecords() {
@@ -671,10 +728,12 @@ App.DB = (function () {
 
   async function clearWords() {
     await rpc('clear_user_data', {});
+    invalidateCache(); // v1.11.1
   }
 
   async function clearAll() {
     await rpc('clear_user_data', {});
+    invalidateCache(); // v1.11.1
   }
 
   /** 按单词文本精确查找 (不区分大小写) */
@@ -1001,6 +1060,8 @@ App.DB = (function () {
     markMessageRead: markMessageRead,
     // v1.10.0 预置词库
     syncPresetWords: syncPresetWords,
+    // v1.11.1 缓存控制
+    invalidateCache: invalidateCache,
   };
 })();
 

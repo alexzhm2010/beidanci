@@ -117,17 +117,30 @@ App.Library = (function () {
       if (btn.classList.contains('btn-edit')) editWord(wordId);
     });
 
-    // 滚动加载更多
+    // 滚动加载更多 (v1.11.1 性能优化: passive + rAF 节流, 避免每帧强制 reflow)
     var container = document.querySelector('.word-table-container');
     if (container) {
-      container.addEventListener('scroll', handleScroll);
+      container.addEventListener('scroll', scheduleScrollCheck, { passive: true });
     }
     // 移动端: 监听窗口滚动
-    window.addEventListener('scroll', function () {
-      var view = document.getElementById('view-library');
-      if (!view || !view.classList.contains('active')) return;
+    window.addEventListener('scroll', onWindowScroll, { passive: true });
+  }
+
+  // v1.11.1: rAF 节流, 一帧内最多执行一次 handleScroll
+  var _scrollRafPending = false;
+  function scheduleScrollCheck() {
+    if (_scrollRafPending) return;
+    _scrollRafPending = true;
+    requestAnimationFrame(function () {
+      _scrollRafPending = false;
       handleScroll();
     });
+  }
+  // v1.11.1: 全局 scroll 监听只在 library 视图激活时才执行
+  function onWindowScroll() {
+    var view = document.getElementById('view-library');
+    if (!view || !view.classList.contains('active')) return;
+    scheduleScrollCheck();
   }
 
   function handleScroll() {
@@ -150,6 +163,7 @@ App.Library = (function () {
       loadMore();
     }
   }
+
 
   async function show() {
     document.getElementById('searchInput').value = currentQuery;
@@ -280,6 +294,29 @@ App.Library = (function () {
         '</td>' +
       '</tr>';
   }
+
+  // v1.11.1 性能优化: 局部更新某一行 (编辑后), 避免全表 reload
+  function updateRowInPlace(word) {
+    var row = document.querySelector('tr[data-word-id="' + CSS.escape(word.id) + '"]');
+    if (!row) return false;
+    var html = renderRow(word);
+    // extract inner <td>...</td> from new row, replace existing td's
+    var tmp = document.createElement('tbody');
+    tmp.innerHTML = html;
+    var newRow = tmp.firstElementChild;
+    if (newRow) {
+      row.innerHTML = newRow.innerHTML;
+    }
+    return true;
+  }
+
+  // v1.11.1 性能优化: 局部删除某一行, 避免全表 reload
+  function removeRowInPlace(wordId) {
+    var row = document.querySelector('tr[data-word-id="' + CSS.escape(wordId) + '"]');
+    if (row) { row.remove(); return true; }
+    return false;
+  }
+
 
   // ========== 批量导入 ==========
 
@@ -707,7 +744,16 @@ App.Library = (function () {
         await App.DB.addWord(wordData);
         App.hideModal();
         App.showToast(isEdit ? '修改成功！' : '添加成功！', 'success');
-        await loadWords(currentQuery);
+        // v1.11.1 性能优化: 编辑已存在行, 走局部更新; 新增仍需 reload (因排序可能不在当前页)
+        if (isEdit) {
+          // addWord 已把 wordData 完整存入, id 不变, 直接用其更新行
+          if (!updateRowInPlace(wordData)) {
+            // 行不在当前视图中 (翻页/搜索), 兜底 reload
+            await loadWords(currentQuery);
+          }
+        } else {
+          await loadWords(currentQuery);
+        }
       } catch (e) {
         App.showToast('保存失败: ' + e.message, 'error');
       }
@@ -1187,7 +1233,10 @@ App.Library = (function () {
       try {
         await App.DB.deleteWord(wordId);
         App.showToast('删除成功', 'success');
-        await loadWords(currentQuery);
+        // v1.11.1 性能优化: 局部删除行, 失败兜底 reload
+        if (!removeRowInPlace(wordId)) {
+          await loadWords(currentQuery);
+        }
       } catch (e) {
         App.showToast('删除失败: ' + e.message, 'error');
       }
