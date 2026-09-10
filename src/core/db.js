@@ -597,29 +597,42 @@ App.DB = (function () {
     return all;
   }
 
-  /** 搜索单词 (空查询时按熟练度升序, 支持分页) */
+  /**
+   * 搜索单词 (空查询时按熟练度升序, 支持分页)
+   *
+   * v1.11.2 性能优化:
+   *   - 30s TTL 缓存: 同一查询的完整排序结果缓存 30s, 切 tab 回来秒开;
+   *     写操作 (增删改/学习记录) 会经 invalidateCache() 立即失效, 无脏数据风险
+   *   - 轻量 select 投影: 仅拉取排序+列表渲染所需列, 跳过 example_sentence
+   *     (单词表中最大文本字段, 列表从不展示, 编辑走 getWord() 单独取全量)
+   *     显著降低每次打开的传输+解析开销, 保留按熟练度排序的精确语义
+   */
   async function searchWords(query, offset, limit) {
     var q = (query || '').trim().toLowerCase();
     offset = offset || 0;
     limit = limit || App.Config.SEARCH_MAX_ROWS;
 
-    if (!q) {
-      var uid = getUserId();
-      var base = 'user_id=eq.' + encodeURIComponent(uid);
-      var words = await fetchAllPages('words', base, rowToWord);
-      words.sort(function (a, b) {
-        var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
-        var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
-        if (pa !== pb) return pa - pb;
-        return (a.createdAt || 0) - (b.createdAt || 0);
-      });
-      return { words: words.slice(offset, offset + limit), total: words.length };
+    var cacheKey = 'searchWords:' + q;
+    var sorted = _cacheGet(cacheKey);
+    if (!sorted) {
+      sorted = await _fetchWordsSorted(q);
+      _cacheSet(cacheKey, sorted);
     }
+    return { words: sorted.slice(offset, offset + limit), total: sorted.length };
+  }
 
+  // 拉取并按熟练度升序排序 (空查询拉全量, 有查询按 ilike 过滤)
+  // 仅 select 排序+列表所需列, 避免传输 example_sentence 等大字段
+  async function _fetchWordsSorted(q) {
     var uid = getUserId();
-    var qEnc = encodeURIComponent(q);
-    var orFilter = 'or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
-    var base = 'user_id=eq.' + encodeURIComponent(uid) + '&' + orFilter;
+    // 列表渲染仅需: word/phonetic/chineseMeaning; 排序+熟练度徽章仅需: knownCount/totalCount/createdAt
+    // 跳过 example_sentence (最大文本列) / stability / next_review_at / last_* 等编辑时才用到的字段
+    var base = 'user_id=eq.' + encodeURIComponent(uid) +
+      '&select=id,word,phonetic,part_of_speech,chinese_meaning,total_count,known_count,created_at';
+    if (q) {
+      var qEnc = encodeURIComponent(q);
+      base += '&or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
+    }
 
     var words = await fetchAllPages('words', base, rowToWord);
     words.sort(function (a, b) {
@@ -628,7 +641,7 @@ App.DB = (function () {
       if (pa !== pb) return pa - pb;
       return (a.createdAt || 0) - (b.createdAt || 0);
     });
-    return { words: words.slice(offset, offset + limit), total: words.length };
+    return words;
   }
 
   /** 批量导入: mode = 'overwrite' | 'incremental' */
