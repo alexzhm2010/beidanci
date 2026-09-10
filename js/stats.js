@@ -9,9 +9,69 @@ App.Stats = (function () {
   var yearlyState = { year: 0 }; // 年度看板当前年份
   var cachedWords = [];
   var cachedRecords = [];
+  // v1.10.4 预聚合索引 (O(N) 一次构建, 各模块 O(1) 查表)
+  var dayBuckets = {};        // key: 'YYYY-MM-DD' → { records: [], count, known, newWords: Set }
+  var monthBuckets = {};      // key: 'YYYY-MM' → { records: [], count, known, newWords: Set, wordIds: Set }
+  var profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };  // 熟练度分布: <40/40-60/60-80/80+
 
   function init() {
     // 统计模块无需绑定事件, 每次 show() 时刷新
+  }
+
+  /** v1.10.4 O(N) 预聚合: 一次遍历 records + words 构建所有索引 */
+  function buildAggregates(records, words) {
+    dayBuckets = {};
+    monthBuckets = {};
+    profDist = { 0: 0, 40: 0, 60: 0, 80: 0 };
+
+    // 1) records → 按天/月分桶 (O(N))
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var d = new Date(r.timestamp);
+      var dKey = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+      var mKey = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+
+      // 天桶
+      var db = dayBuckets[dKey];
+      if (!db) { db = { count: 0, known: 0, newWords: {} }; dayBuckets[dKey] = db; }
+      db.count++;
+      if (r.isKnown) db.known++;
+      if (r.sessionType === 'new' && r.wordId) db.newWords[r.wordId] = true;
+
+      // 月桶
+      var mb = monthBuckets[mKey];
+      if (!mb) { mb = { count: 0, known: 0, newWords: {}, wordIds: {} }; monthBuckets[mKey] = mb; }
+      mb.count++;
+      if (r.isKnown) mb.known++;
+      if (r.sessionType === 'new' && r.wordId) mb.newWords[r.wordId] = true;
+      if (r.wordId) mb.wordIds[r.wordId] = true;
+    }
+
+    // 2) words → 熟练度分布 (O(W))
+    for (var j = 0; j < words.length; j++) {
+      var w = words[j];
+      if (!w.totalCount || w.totalCount === 0) continue;
+      var p = w.knownCount / w.totalCount;
+      if (p < 0.4) profDist[0]++;
+      else if (p < 0.6) profDist[40]++;
+      else if (p < 0.8) profDist[60]++;
+      else profDist[80]++;
+    }
+  }
+
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  /** 从 dayBuckets 查某天的记录数 (O(1)) */
+  function getDayCount(y, m, d) {
+    var key = y + '-' + pad2(m + 1) + '-' + pad2(d);
+    var b = dayBuckets[key];
+    return b ? b.count : 0;
+  }
+
+  /** 从 dayBuckets 查某天是否活跃 (O(1)) */
+  function isDayActive(y, m, d) {
+    var key = y + '-' + pad2(m + 1) + '-' + pad2(d);
+    return !!dayBuckets[key];
   }
 
   async function show() {
@@ -48,6 +108,9 @@ App.Stats = (function () {
       cachedWords = words;
       cachedRecords = records;
 
+      // v1.10.4 O(N) 预聚合: 后续 streak/日历/年度看板/月度统计全部查表
+      buildAggregates(records, words);
+
       render(words, records, wordCounts);
     } catch (e) {
       document.getElementById('statsContent').innerHTML =
@@ -72,37 +135,37 @@ App.Stats = (function () {
       return;
     }
 
-    // ---- 计算统计数据 ----
+    // ---- 计算统计数据 (v1.10.4: 全部查表 O(1), 不再遍历 records) ----
     var dueNow = App.Algorithm.getDueCount(words);
     var upcoming24h = App.Algorithm.getUpcomingCount(words, 24);
 
-    // 今日
+    // 今日 (查 dayBuckets)
     var todayStart = App.Utils.todayStart();
-    var todayRecords = records.filter(function (r) { return r.timestamp >= todayStart; });
-    var todayCount = todayRecords.length;
-    var todayKnown = todayRecords.filter(function (r) { return r.isKnown; }).length;
+    var today = new Date();
+    var todayBucket = dayBuckets[today.getFullYear() + '-' + pad2(today.getMonth() + 1) + '-' + pad2(today.getDate())];
+    var todayCount = todayBucket ? todayBucket.count : 0;
+    var todayKnown = todayBucket ? todayBucket.known : 0;
     var todayAccuracy = todayCount > 0 ? Math.round((todayKnown / todayCount) * 100) : 0;
 
-    // 近7天
+    // 近7天 (查 dayBuckets, O(7))
     var days = [];
     for (var i = 6; i >= 0; i--) {
-      var dStart = App.Utils.daysAgoStart(i);
-      var dEnd = dStart + 86400000;
-      var dayRecs = records.filter(function (r) { return r.timestamp >= dStart && r.timestamp < dEnd; });
+      var d = App.Utils.daysAgoStart(i);
+      var dd = new Date(d);
+      var bucket = dayBuckets[dd.getFullYear() + '-' + pad2(dd.getMonth() + 1) + '-' + pad2(dd.getDate())];
       days.push({
-        date: dStart,
-        total: dayRecs.length,
-        known: dayRecs.filter(function (r) { return r.isKnown; }).length,
+        date: d,
+        total: bucket ? bucket.count : 0,
+        known: bucket ? bucket.known : 0,
       });
     }
 
-    // 连续天数
+    // 连续天数 (查 dayBuckets, O(streak) 而非 O(365*N))
     var streak = 0;
     for (var i2 = 0; i2 < 365; i2++) {
-      var dStart2 = App.Utils.daysAgoStart(i2);
-      var dEnd2 = dStart2 + 86400000;
-      var hasActivity = records.some(function (r) { return r.timestamp >= dStart2 && r.timestamp < dEnd2; });
-      if (hasActivity) streak++;
+      var dd2 = new Date(App.Utils.daysAgoStart(i2));
+      var key2 = dd2.getFullYear() + '-' + pad2(dd2.getMonth() + 1) + '-' + pad2(dd2.getDate());
+      if (dayBuckets[key2]) streak++;
       else if (i2 > 0) break;
     }
 
@@ -113,15 +176,23 @@ App.Stats = (function () {
       '已掌握': mastered,
     };
 
-    // 本周新词
+    // 本周新词 (查 dayBuckets, O(7))
     var weekStart = App.Utils.daysAgoStart(6);
-    var weekNewWords = records.filter(function (r) {
-      return r.timestamp >= weekStart && r.sessionType === 'new';
-    }).length;
+    var weekNewWords = 0;
+    for (var i3 = 0; i3 < 7; i3++) {
+      var dd3 = new Date(App.Utils.daysAgoStart(i3));
+      var b3 = dayBuckets[dd3.getFullYear() + '-' + pad2(dd3.getMonth() + 1) + '-' + pad2(dd3.getDate())];
+      if (b3) weekNewWords += Object.keys(b3.newWords).length;
+    }
 
-    // 总体正确率
-    var totalKnown = records.filter(function (r) { return r.isKnown; }).length;
-    var overallAccuracy = records.length > 0 ? Math.round((totalKnown / records.length) * 100) : 0;
+    // 总体正确率 (查 monthBuckets 汇总, O(12))
+    var totalKnown = 0;
+    var totalRecords = 0;
+    Object.keys(monthBuckets).forEach(function (mk) {
+      totalKnown += monthBuckets[mk].known;
+      totalRecords += monthBuckets[mk].count;
+    });
+    var overallAccuracy = totalRecords > 0 ? Math.round((totalKnown / totalRecords) * 100) : 0;
 
     // ---- 渲染 ----
     var html =
@@ -209,15 +280,10 @@ App.Stats = (function () {
     var daysInMonth = new Date(y, m + 1, 0).getDate();
     var firstDay = new Date(y, m, 1).getDay(); // 0=周日
 
-    // 按天统计学习记录数
+    // 按天统计学习记录数 (v1.10.4: 查 dayBuckets O(31) 而非 O(31*N))
     var dayCounts = {};
     for (var d = 1; d <= daysInMonth; d++) {
-      var dayStart = new Date(y, m, d, 0, 0, 0, 0).getTime();
-      var dayEnd = dayStart + 86400000;
-      var count = cachedRecords.filter(function (r) {
-        return r.timestamp >= dayStart && r.timestamp < dayEnd;
-      }).length;
-      dayCounts[d] = count;
+      dayCounts[d] = getDayCount(y, m, d);
     }
 
     // 构建日历HTML
@@ -281,24 +347,15 @@ App.Stats = (function () {
   }
 
   function renderMonthlyStats(y, m, dayCounts) {
-    // 统计当月数据
-    var monthStart = new Date(y, m, 1, 0, 0, 0, 0).getTime();
-    var monthEnd = new Date(y, m + 1, 1, 0, 0, 0, 0).getTime();
-
-    var monthRecords = cachedRecords.filter(function (r) {
-      return r.timestamp >= monthStart && r.timestamp < monthEnd;
-    });
-    var monthTotal = monthRecords.length;
-    var monthKnown = monthRecords.filter(function (r) { return r.isKnown; }).length;
-    // 月度「新学词」= 当月 sessionType=new 的去重单词数
-    var monthNewSet = {};
-    monthRecords.forEach(function (r) {
-      if (r.sessionType === 'new' && r.wordId) monthNewSet[r.wordId] = true;
-    });
-    var monthNewWords = Object.keys(monthNewSet).length;
+    // v1.10.4: 查 monthBuckets O(1) 而非 O(N) filter
+    var mKey = y + '-' + pad2(m + 1);
+    var mb = monthBuckets[mKey] || { count: 0, known: 0, newWords: {}, wordIds: {} };
+    var monthTotal = mb.count;
+    var monthKnown = mb.known;
+    var monthNewWords = Object.keys(mb.newWords).length;
     var monthAccuracy = monthTotal > 0 ? Math.round((monthKnown / monthTotal) * 100) : 0;
 
-    // 活跃天数
+    // 活跃天数 + 奖牌数 (查 dayCounts, O(31))
     var activeDays = 0;
     var goldDays = 0, silverDays = 0, bronzeDays = 0;
     var daysInMonth = new Date(y, m + 1, 0).getDate();
@@ -310,10 +367,13 @@ App.Stats = (function () {
       else if (c >= 100) bronzeDays++;
     }
 
-    // 当月新学单词数 (首次学习发生在本月的去重单词)
+    // 当月接触/掌握词 (查 cachedWords 一次, 不再嵌套 monthBuckets)
+    var monthStart = new Date(y, m, 1, 0, 0, 0, 0).getTime();
+    var monthEnd = new Date(y, m + 1, 1, 0, 0, 0, 0).getTime();
     var monthLearnedWords = 0;
     var monthMasteredWords = 0;
-    cachedWords.forEach(function (w) {
+    for (var i = 0; i < cachedWords.length; i++) {
+      var w = cachedWords[i];
       if (w.lastLearnTime && w.lastLearnTime >= monthStart && w.lastLearnTime < monthEnd) {
         monthLearnedWords++;
       }
@@ -322,18 +382,13 @@ App.Stats = (function () {
           monthMasteredWords++;
         }
       }
-    });
+    }
 
-    // 熟练度分布
-    var prof0_40 = 0, prof40_60 = 0, prof60_80 = 0, prof80_100 = 0;
-    cachedWords.forEach(function (w) {
-      if (!w.totalCount || w.totalCount === 0) return;
-      var p = w.knownCount / w.totalCount;
-      if (p < 0.4) prof0_40++;
-      else if (p < 0.6) prof40_60++;
-      else if (p < 0.8) prof60_80++;
-      else prof80_100++;
-    });
+    // 熟练度分布 (查预聚合 profDist, O(1))
+    var prof0_40 = profDist[0];
+    var prof40_60 = profDist[40];
+    var prof60_80 = profDist[60];
+    var prof80_100 = profDist[80];
 
     var html =
       '<div class="chart-card">' +
@@ -388,35 +443,34 @@ App.Stats = (function () {
     var newWordCounts = [];
     var avgProficiencies = [];
 
+    // v1.10.4: 查 monthBuckets O(12) 而非 O(24*N) 双重循环
+    // 先构建 wordId→word 映射, 用于算月度平均熟练度
+    var wordMap = {};
+    for (var i = 0; i < cachedWords.length; i++) {
+      wordMap[cachedWords[i].id] = cachedWords[i];
+    }
+
     for (var m = 0; m < 12; m++) {
       monthLabels.push((m + 1) + '月');
-      var monthStart = new Date(y, m, 1, 0, 0, 0, 0).getTime();
-      var monthEnd = new Date(y, m + 1, 1, 0, 0, 0, 0).getTime();
+      var mKey = y + '-' + pad2(m + 1);
+      var mb = monthBuckets[mKey];
 
-      // 该月新学单词数 = sessionType=new 的去重单词数
-      var monthNewSet = {};
-      cachedRecords.forEach(function (r) {
-        if (r.timestamp >= monthStart && r.timestamp < monthEnd && r.sessionType === 'new' && r.wordId) {
-          monthNewSet[r.wordId] = true;
-        }
-      });
-      newWordCounts.push(Object.keys(monthNewSet).length);
+      // 新词学习量 = monthBuckets.newWords 的去重数
+      newWordCounts.push(mb ? Object.keys(mb.newWords).length : 0);
 
-      // 该月平均熟练度 (该月有学习记录的单词的平均熟练度)
-      var monthWordIds = {};
-      cachedRecords.forEach(function (r) {
-        if (r.timestamp >= monthStart && r.timestamp < monthEnd && r.wordId) {
-          monthWordIds[r.wordId] = true;
-        }
-      });
+      // 平均熟练度 = 该月有学习记录的单词的平均熟练度
       var profSum = 0;
       var profCount = 0;
-      cachedWords.forEach(function (w) {
-        if (monthWordIds[w.id] && w.totalCount > 0) {
-          profSum += w.knownCount / w.totalCount;
-          profCount++;
+      if (mb) {
+        var wordIds = Object.keys(mb.wordIds);
+        for (var j = 0; j < wordIds.length; j++) {
+          var w = wordMap[wordIds[j]];
+          if (w && w.totalCount > 0) {
+            profSum += w.knownCount / w.totalCount;
+            profCount++;
+          }
         }
-      });
+      }
       var avgProf = profCount > 0 ? Math.round((profSum / profCount) * 100) : 0;
       avgProficiencies.push(avgProf);
     }
