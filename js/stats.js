@@ -228,8 +228,8 @@ App.Stats = (function () {
         '<button class="btn btn-sm btn-outline" id="btnNextMonth">&gt;</button>' +
       '</div>' +
       '<div class="calendar-legend">' +
-        '<span class="legend-item"><span class="medal medal-gold">🥇</span>≥200</span>' +
-        '<span class="legend-item"><span class="medal medal-silver">🥈</span>≥150</span>' +
+        '<span class="legend-item"><span class="medal medal-gold">🥇</span>≥300</span>' +
+        '<span class="legend-item"><span class="medal medal-silver">🥈</span>≥200</span>' +
         '<span class="legend-item"><span class="medal medal-bronze">🥉</span>≥100</span>' +
       '</div>' +
       '<div class="calendar-grid">' +
@@ -248,8 +248,8 @@ App.Stats = (function () {
       var medal = '';
       var medalClass = '';
 
-      if (count >= 200) { medal = '🥇'; medalClass = 'has-medal gold'; }
-      else if (count >= 150) { medal = '🥈'; medalClass = 'has-medal silver'; }
+      if (count >= 300) { medal = '🥇'; medalClass = 'has-medal gold'; }
+      else if (count >= 200) { medal = '🥈'; medalClass = 'has-medal silver'; }
       else if (count >= 100) { medal = '🥉'; medalClass = 'has-medal bronze'; }
 
       var countDisplay = count > 0 ? count : '';
@@ -305,8 +305,8 @@ App.Stats = (function () {
     for (var d = 1; d <= daysInMonth; d++) {
       var c = dayCounts[d] || 0;
       if (c > 0) activeDays++;
-      if (c >= 200) goldDays++;
-      else if (c >= 150) silverDays++;
+      if (c >= 300) goldDays++;
+      else if (c >= 200) silverDays++;
       else if (c >= 100) bronzeDays++;
     }
 
