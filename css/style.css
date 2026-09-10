@@ -115,6 +115,9 @@ input, textarea, select { font-family: inherit; outline: none; }
 .toolbar-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .library-info { display: flex; gap: 16px; margin-bottom: 12px; font-size: 14px; color: var(--color-text-light); }
 .word-table-container { background: var(--color-card); border-radius: var(--radius); box-shadow: var(--shadow); overflow-x: auto; max-height: calc(100vh - 280px); overflow-y: auto; }
+.library-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.library-pagination .page-info { font-size: 14px; color: var(--color-text-light); min-width: 90px; text-align: center; }
+.library-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
 .word-table { width: 100%; border-collapse: collapse; min-width: 650px; }
 .word-table thead { background: var(--color-border-light); }
 .word-table th { padding: 12px 14px; text-align: left; font-size: 13px; font-weight: 600; color: var(--color-text-light); border-bottom: 2px solid var(--color-border); white-space: nowrap; }

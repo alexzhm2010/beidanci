@@ -42,6 +42,13 @@ App.Library = (function () {
             <tbody id="wordTableBody"></tbody>
           </table>
         </div>
+        <div class="library-pagination" id="libraryPagination">
+          <button class="btn btn-outline btn-sm" id="btnFirstPage" title="第一页">&laquo;</button>
+          <button class="btn btn-outline btn-sm" id="btnPrevPage" title="上一页">&lsaquo; 上一页</button>
+          <span id="pageInfo" class="page-info">第 1 / 1 页</span>
+          <button class="btn btn-outline btn-sm" id="btnNextPage" title="下一页">下一页 &rsaquo;</button>
+          <button class="btn btn-outline btn-sm" id="btnLastPage" title="最后一页">&raquo;</button>
+        </div>
       `;
 
   // ========== 第三方库按需懒加载 ==========
@@ -72,10 +79,10 @@ App.Library = (function () {
   }
 
   var currentQuery = '';
-  var displayedCount = 0;
+  var currentPage = 1;
+  var totalPages = 1;
   var totalCount = 0;
   var isLoading = false;
-  var hasMore = true;
 
   // Excel表头 → 字段名 映射
   var HEADER_MAP = {
@@ -95,8 +102,9 @@ App.Library = (function () {
       view.dataset.mounted = '1';
     }
 
-    // 搜索 (防抖)
+    // 搜索 (防抖) — 搜索时重置到第一页
     var debouncedSearch = App.Utils.debounce(function () {
+      currentPage = 1;
       loadWords(document.getElementById('searchInput').value);
     }, 800);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
@@ -117,51 +125,11 @@ App.Library = (function () {
       if (btn.classList.contains('btn-edit')) editWord(wordId);
     });
 
-    // 滚动加载更多 (v1.11.1 性能优化: passive + rAF 节流, 避免每帧强制 reflow)
-    var container = document.querySelector('.word-table-container');
-    if (container) {
-      container.addEventListener('scroll', scheduleScrollCheck, { passive: true });
-    }
-    // 移动端: 监听窗口滚动
-    window.addEventListener('scroll', onWindowScroll, { passive: true });
-  }
-
-  // v1.11.1: rAF 节流, 一帧内最多执行一次 handleScroll
-  var _scrollRafPending = false;
-  function scheduleScrollCheck() {
-    if (_scrollRafPending) return;
-    _scrollRafPending = true;
-    requestAnimationFrame(function () {
-      _scrollRafPending = false;
-      handleScroll();
-    });
-  }
-  // v1.11.1: 全局 scroll 监听只在 library 视图激活时才执行
-  function onWindowScroll() {
-    var view = document.getElementById('view-library');
-    if (!view || !view.classList.contains('active')) return;
-    scheduleScrollCheck();
-  }
-
-  function handleScroll() {
-    if (isLoading || !hasMore) return;
-    var scrollContainer = document.querySelector('.word-table-container');
-    var scrollTop, scrollHeight, clientHeight;
-
-    if (scrollContainer) {
-      scrollTop = scrollContainer.scrollTop;
-      scrollHeight = scrollContainer.scrollHeight;
-      clientHeight = scrollContainer.clientHeight;
-    } else {
-      scrollTop = window.scrollY || document.documentElement.scrollTop;
-      scrollHeight = document.documentElement.scrollHeight;
-      clientHeight = window.innerHeight;
-    }
-
-    // 距底部 50px 内触发加载
-    if (scrollTop + clientHeight >= scrollHeight - 50) {
-      loadMore();
-    }
+    // 翻页按钮 (v1.11.2: 分页加载, 每页固定 30 条, 不再累加)
+    document.getElementById('btnFirstPage').addEventListener('click', function () { goToPage(1); });
+    document.getElementById('btnPrevPage').addEventListener('click', function () { goToPage(currentPage - 1); });
+    document.getElementById('btnNextPage').addEventListener('click', function () { goToPage(currentPage + 1); });
+    document.getElementById('btnLastPage').addEventListener('click', function () { goToPage(totalPages); });
   }
 
 
@@ -174,20 +142,48 @@ App.Library = (function () {
 
   async function loadWords(query) {
     currentQuery = query || '';
-    displayedCount = 0;
-    totalCount = 0;
-    hasMore = true;
+    currentPage = 1;
+    await renderPage();
+  }
+
+  // 刷新当前页 (不重置页码): 增删改后保持用户所在页
+  // 删除后当前页可能变空, renderPage 内部会自动回退到有效页
+  async function reloadCurrentPage() {
+    await renderPage();
+  }
+
+  // 翻页: 边界由 updatePagination 保证, 这里只负责加载目标页
+  async function goToPage(page) {
+    if (isLoading) return;
+    page = Math.max(1, Math.min(page, totalPages));
+    if (page === currentPage) return;
+    currentPage = page;
+    await renderPage();
+    // 翻页后滚到表格顶部, 体验更自然
+    var container = document.querySelector('.word-table-container');
+    if (container) container.scrollTop = 0;
+  }
+
+  // 加载并渲染当前页 (currentPage), 每页固定 SEARCH_PAGE_SIZE 条
+  async function renderPage() {
     var tbody = document.getElementById('wordTableBody');
     tbody.innerHTML = '<tr><td colspan="5" class="empty-row">加载中...</td></tr>';
 
     isLoading = true;
+    updatePagination(); // 加载中禁用所有翻页按钮
     try {
-      var result = await App.DB.searchWords(currentQuery, 0, App.Config.SEARCH_MAX_ROWS);
+      var offset = (currentPage - 1) * App.Config.SEARCH_PAGE_SIZE;
+      var result = await App.DB.searchWords(currentQuery, offset, App.Config.SEARCH_PAGE_SIZE);
       totalCount = result.total;
-      displayedCount = result.words.length;
-      hasMore = displayedCount < totalCount;
-      renderTable(result.words, true);
+      totalPages = totalCount > 0 ? Math.ceil(totalCount / App.Config.SEARCH_PAGE_SIZE) : 1;
+      // 越界修正: 删除单词后当前页可能为空, 回退到上一页
+      if (result.words.length === 0 && currentPage > 1) {
+        currentPage = totalPages;
+        return renderPage();
+      }
+      renderTable(result.words);
       updateInfo();
+      updatePagination();
 
       // 搜索无结果且查询词非空: 自动弹出新增弹窗
       if (result.words.length === 0 && currentQuery.trim()) {
@@ -203,74 +199,43 @@ App.Library = (function () {
       App.showToast('加载词库失败: ' + e.message, 'error');
     } finally {
       isLoading = false;
-    }
-  }
-
-  async function loadMore() {
-    if (isLoading || !hasMore) return;
-    isLoading = true;
-
-    // 显示加载指示器
-    var tbody = document.getElementById('wordTableBody');
-    var loadingRow = document.createElement('tr');
-    loadingRow.className = 'loading-row';
-    loadingRow.innerHTML = '<td colspan="5" class="empty-row">加载中...</td>';
-    tbody.appendChild(loadingRow);
-
-    try {
-      var nextOffset = displayedCount;
-      var result = await App.DB.searchWords(currentQuery, nextOffset, App.Config.SEARCH_PAGE_SIZE);
-      totalCount = result.total;
-
-      // 移除加载指示器
-      tbody.removeChild(loadingRow);
-
-      if (result.words.length > 0) {
-        displayedCount += result.words.length;
-        hasMore = displayedCount < totalCount;
-        renderTable(result.words, false);
-      } else {
-        hasMore = false;
-      }
-      updateInfo();
-    } catch (e) {
-      try { tbody.removeChild(loadingRow); } catch (e2) {}
-      App.showToast('加载更多失败: ' + e.message, 'error');
-    } finally {
-      isLoading = false;
+      updatePagination();
     }
   }
 
   function updateInfo() {
     var info = document.getElementById('libraryWordCount');
     var searchInfo = document.getElementById('librarySearchInfo');
-    info.textContent = displayedCount + ' / ' + totalCount;
-    searchInfo.textContent = currentQuery ? '搜索: "' + currentQuery + '"' : '按熟练度排序';
+    info.textContent = '共 ' + totalCount + ' 词';
+    searchInfo.textContent = currentQuery ? '搜索: "' + currentQuery + '"' : '按添加时间排序';
   }
 
-  function renderTable(words, isReset) {
+  // 翻页按钮可用状态 + 页码显示
+  function updatePagination() {
+    var pageInfo = document.getElementById('pageInfo');
+    var btnFirst = document.getElementById('btnFirstPage');
+    var btnPrev = document.getElementById('btnPrevPage');
+    var btnNext = document.getElementById('btnNextPage');
+    var btnLast = document.getElementById('btnLastPage');
+    if (!pageInfo) return;
+    pageInfo.textContent = '第 ' + currentPage + ' / ' + totalPages + ' 页';
+    var atFirst = currentPage <= 1;
+    var atLast = currentPage >= totalPages;
+    var disabled = isLoading;
+    btnFirst.disabled = atFirst || disabled;
+    btnPrev.disabled = atFirst || disabled;
+    btnNext.disabled = atLast || disabled;
+    btnLast.disabled = atLast || disabled;
+  }
+
+  function renderTable(words) {
     var tbody = document.getElementById('wordTableBody');
-    var esc = App.Utils.escapeHtml;
 
-    if (isReset) {
-      if (words.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-row">暂无单词数据，点击"单个新增"或"批量导入"添加单词</td></tr>';
-        return;
-      }
-      tbody.innerHTML = words.map(function (w) { return renderRow(w); }).join('');
-    } else {
-      // 追加模式
-      if (words.length === 0) return;
-      var html = words.map(function (w) { return renderRow(w); }).join('');
-      tbody.insertAdjacentHTML('beforeend', html);
+    if (!words || words.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-row">暂无单词数据，点击"单个新增"或"批量导入"添加单词</td></tr>';
+      return;
     }
-
-    // 底部提示 (仅在加载过更多数据后显示)
-    if (!hasMore && displayedCount > App.Config.SEARCH_MAX_ROWS) {
-      var endRow = document.createElement('tr');
-      endRow.innerHTML = '<td colspan="5" class="empty-row" style="padding:20px;color:var(--color-text-lighter);">没有更多了</td>';
-      tbody.appendChild(endRow);
-    }
+    tbody.innerHTML = words.map(function (w) { return renderRow(w); }).join('');
   }
 
   function renderRow(w) {
@@ -296,6 +261,7 @@ App.Library = (function () {
   }
 
   // v1.11.1 性能优化: 局部更新某一行 (编辑后), 避免全表 reload
+  // v1.11.2: 删除已改为整页 reload (分页下需重算页码), 仅保留编辑用的局部更新
   function updateRowInPlace(word) {
     var row = document.querySelector('tr[data-word-id="' + CSS.escape(word.id) + '"]');
     if (!row) return false;
@@ -308,13 +274,6 @@ App.Library = (function () {
       row.innerHTML = newRow.innerHTML;
     }
     return true;
-  }
-
-  // v1.11.1 性能优化: 局部删除某一行, 避免全表 reload
-  function removeRowInPlace(wordId) {
-    var row = document.querySelector('tr[data-word-id="' + CSS.escape(wordId) + '"]');
-    if (row) { row.remove(); return true; }
-    return false;
   }
 
 
@@ -1233,10 +1192,8 @@ App.Library = (function () {
       try {
         await App.DB.deleteWord(wordId);
         App.showToast('删除成功', 'success');
-        // v1.11.1 性能优化: 局部删除行, 失败兜底 reload
-        if (!removeRowInPlace(wordId)) {
-          await loadWords(currentQuery);
-        }
+        // v1.11.2 分页: 删除后刷新当前页 (renderPage 会修正越界), 不重置页码
+        await reloadCurrentPage();
       } catch (e) {
         App.showToast('删除失败: ' + e.message, 'error');
       }

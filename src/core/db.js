@@ -598,50 +598,42 @@ App.DB = (function () {
   }
 
   /**
-   * 搜索单词 (空查询时按熟练度升序, 支持分页)
+   * 搜索单词 (服务端分页)
    *
-   * v1.11.2 性能优化:
-   *   - 30s TTL 缓存: 同一查询的完整排序结果缓存 30s, 切 tab 回来秒开;
-   *     写操作 (增删改/学习记录) 会经 invalidateCache() 立即失效, 无脏数据风险
-   *   - 轻量 select 投影: 仅拉取排序+列表渲染所需列, 跳过 example_sentence
-   *     (单词表中最大文本字段, 列表从不展示, 编辑走 getWord() 单独取全量)
-   *     显著降低每次打开的传输+解析开销, 保留按熟练度排序的精确语义
+   * v1.11.2 性能优化: 改服务端分页, 前端每次只持有一页 (limit 条), 不再全量拉取
+   *   - order=created_at.desc 服务端按添加时间倒序, 配合 limit/offset 稳定分页
+   *   - count=exact 拿总数 (Content-Range), 不可用时回退 countByPaging
+   *   - 轻量 select 投影: 仅列表渲染所需列, 跳过 example_sentence 等大字段
+   *   - 注: 原"按熟练度 (known_count/total_count) 排序"无法服务端分页
+   *     (PostgREST order 不支持表达式), 改为按添加时间倒序; 列表语义同步调整
+   *     如需恢复熟练度排序, 可在 words 表加 generated 列 proficiency_ratio 后用 order 排序
    */
   async function searchWords(query, offset, limit) {
     var q = (query || '').trim().toLowerCase();
     offset = offset || 0;
     limit = limit || App.Config.SEARCH_MAX_ROWS;
 
-    var cacheKey = 'searchWords:' + q;
-    var sorted = _cacheGet(cacheKey);
-    if (!sorted) {
-      sorted = await _fetchWordsSorted(q);
-      _cacheSet(cacheKey, sorted);
-    }
-    return { words: sorted.slice(offset, offset + limit), total: sorted.length };
-  }
-
-  // 拉取并按熟练度升序排序 (空查询拉全量, 有查询按 ilike 过滤)
-  // 仅 select 排序+列表所需列, 避免传输 example_sentence 等大字段
-  async function _fetchWordsSorted(q) {
     var uid = getUserId();
-    // 列表渲染仅需: word/phonetic/chineseMeaning; 排序+熟练度徽章仅需: knownCount/totalCount/createdAt
-    // 跳过 example_sentence (最大文本列) / stability / next_review_at / last_* 等编辑时才用到的字段
+    var qEnc = encodeURIComponent(q);
     var base = 'user_id=eq.' + encodeURIComponent(uid) +
-      '&select=id,word,phonetic,part_of_speech,chinese_meaning,total_count,known_count,created_at';
+      '&select=id,word,phonetic,part_of_speech,chinese_meaning,total_count,known_count,created_at' +
+      '&order=created_at.desc' +
+      '&limit=' + limit + '&offset=' + offset;
     if (q) {
-      var qEnc = encodeURIComponent(q);
       base += '&or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)';
     }
 
-    var words = await fetchAllPages('words', base, rowToWord);
-    words.sort(function (a, b) {
-      var pa = a.totalCount > 0 ? a.knownCount / a.totalCount : 0;
-      var pb = b.totalCount > 0 ? b.knownCount / b.totalCount : 0;
-      if (pa !== pb) return pa - pb;
-      return (a.createdAt || 0) - (b.createdAt || 0);
-    });
-    return words;
+    var resp = await api('GET', 'words', base, null, { returnResponse: true, count: 'exact' });
+    var rows = await resp.json();
+    var total = extractTotalFromRange(resp);
+    // count=exact 不可用时回退分页计数
+    if (total === 0) {
+      var fallbackFilter = q ? ('or=(word.ilike.*' + qEnc + '*,chinese_meaning.ilike.*' + qEnc + '*)') : '';
+      total = await countByPaging(fallbackFilter);
+    }
+
+    var words = (rows || []).map(rowToWord);
+    return { words: words, total: total };
   }
 
   /** 批量导入: mode = 'overwrite' | 'incremental' */
