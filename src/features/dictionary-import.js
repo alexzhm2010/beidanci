@@ -24,13 +24,16 @@ App.DictImport = (function () {
   // ========== OCR 引擎: 直接 tesseract-core.asm.js 主线程跑 ==========
   // 根因: HarmonyOS NEXT / ArkWeb 的 Web Worker + WASM 有坑
   //       tesseract.js v4/v5 createWorker 内部硬编码用 Worker, 全挂
-  // 方案: 跳过 tesseract.js 框架, 直接调 tesseract-core.asm.js (5.6MB 纯 JS)
+  //       ArkWeb 对跨域 fetch 大文件 (5.6MB) 不稳定, 随机 Failed to fetch
+  // 方案: 跳过 tesseract.js 框架, 直接调 tesseract-core.asm.js (纯 JS)
   //       + pako 解压 tessdata, 完全不碰 WASM 和 Worker
+  //       + 所有 OCR 资源打包到 public/ 目录, 同源加载, 零 CORS 零 fetch 限制
   var ocrModule = null;   // { api, Module } 初始化成功后存 TessBaseAPI 实例
   var ocrInitError = null;
   var tessdataUrlCache = null;
-  var pakoUrl = 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js';
-  var coreAsmUrl = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js';
+  // 同源静态资源 — 已打包进 public/, 极速 + 零 CORS 问题
+  var pakoUrl = '/pako.min.js';
+  var coreAsmUrl = '/tesseract-core.asm.js';
 
   /** 探测 tessdata 最佳来源 */
   async function getTessdataUrl(onProgress) {
@@ -50,35 +53,44 @@ App.DictImport = (function () {
     return tessdataUrlCache;
   }
 
-  /** 通过 fetch + Blob URL 注入远程脚本
-   *  根因: ArkWeb/鸿蒙浏览器对 <script> 标签跨域加载 + Content-Type (配合 nosniff 头) 校验更严格
-   *  jsdelivr 返回 application/javascript + nosniff, ArkWeb 上 <script> 标签可能静默失败或挂起
-   *  但 fetch 时 CORS 是 ok 的 (access-control-allow-origin: *), 所以 fetch 下载内容后用 Blob URL 注入
-   *  绕过所有跨域/MIME/nosniff 限制
+  /** 加载脚本 —— 同源用 script 标签, 跨域 fallback fetch+Blob URL
+   *  同源资源 (public/ 目录下) 没有 CORS/nosniff 问题, 直接 <script src> 最快
+   *  跨域资源 fallback 到 fetch+Blob URL 绕过 ArkWeb 严格校验
    */
   function loadScript(url) {
+    var isSameOrigin = /^\/[^/]/.test(url) || url.indexOf(location.origin) === 0;
     return new Promise(function (resolve, reject) {
-      fetch(url, { credentials: 'omit' }).then(function (resp) {
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.blob();
-      }).then(function (blob) {
-        var blobUrl = URL.createObjectURL(blob);
-        var script = document.createElement('script');
-        script.src = blobUrl;
-        script.onload = function () {
-          // 不能立即 revoke, Emscripten runtime 初始化需要异步读取
-          // 给个宽限期
-          setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
-          resolve();
-        };
-        script.onerror = function () {
-          URL.revokeObjectURL(blobUrl);
-          reject(new Error('Blob URL 脚本加载失败: ' + url));
-        };
-        document.head.appendChild(script);
-      }).catch(function (e) {
-        reject(new Error('脚本 fetch 失败: ' + url + ' — ' + e.message));
-      });
+      var script = document.createElement('script');
+      script.src = url;
+      script.onload = resolve;
+      script.onerror = function () {
+        if (isSameOrigin) {
+          // 同源理论上不应该失败
+          reject(new Error('同源脚本加载失败: ' + url));
+        } else {
+          // 跨域 fallback: fetch → Blob URL (绕过 nosniff/CORS 限制)
+          fetch(url, { credentials: 'omit' }).then(function (resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.blob();
+          }).then(function (blob) {
+            var blobUrl = URL.createObjectURL(blob);
+            var s2 = document.createElement('script');
+            s2.src = blobUrl;
+            s2.onload = function () {
+              setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
+              resolve();
+            };
+            s2.onerror = function () {
+              URL.revokeObjectURL(blobUrl);
+              reject(new Error('Blob URL 也失败: ' + url));
+            };
+            document.head.appendChild(s2);
+          }).catch(function (e) {
+            reject(new Error('脚本加载失败 (script + fetch 双方案): ' + url + ' — ' + e.message));
+          });
+        }
+      };
+      document.head.appendChild(script);
     });
   }
 
@@ -303,7 +315,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.2';
+    var EXPECTED_VER = '1.13.3';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
