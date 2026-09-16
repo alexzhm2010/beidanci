@@ -123,84 +123,138 @@ App.DictImport = (function () {
   /** 直接初始化 tesseract-core.asm.js + tessdata
    *  完全不碰 Worker/WASM, 主线程调 Emscripten API
    */
+  /** fetch 下载 + 进度回调 + 超时控制
+   *  比 fetch + .arrayBuffer() 好在能实时显示进度百分比
+   */
+  async function fetchWithProgress(url, label, onProgress, timeoutMs) {
+    timeoutMs = timeoutMs || 180000;
+    var resp = await withTimeout(fetch(url), timeoutMs, label + ' (fetch)');
+    if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
+    var total = parseInt(resp.headers.get('content-length'), 10) || 0;
+    var reader = resp.body.getReader();
+    var chunks = [];
+    var received = 0;
+    while (true) {
+      var { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0 && onProgress) {
+        var pct = Math.round((received / total) * 100);
+        onProgress(label + ' 下载中...', pct);
+      }
+    }
+    // 合并 chunks
+    var result;
+    if (chunks.length === 0) {
+      result = new Uint8Array(0);
+    } else if (chunks.length === 1) {
+      result = chunks[0];
+    } else {
+      var totalLen = 0;
+      chunks.forEach(function(c){ totalLen += c.length; });
+      result = new Uint8Array(totalLen);
+      var off = 0;
+      chunks.forEach(function(c){ result.set(c, off); off += c.length; });
+    }
+    if (onProgress) onProgress(label + ' 下载完成', 100);
+    return result;
+  }
+
   async function initDirectOcr(onProgress) {
     if (ocrModule) return ocrModule;
 
-    // 1. 加载 pako (gunzip)
-    onProgress && onProgress('加载 pako 解压库...', 0.1);
+    // 1. 加载 pako (46KB, 很快)
+    onProgress && onProgress('加载 pako 解压库...', 5);
     if (typeof window.pako === 'undefined') {
       await loadScript(pakoUrl);
     }
     if (!window.pako) throw new Error('pako 加载失败');
 
-    // 2. 加载 tesseract-core.asm.js (5.6MB 纯 JS, 需要点时间)
-    onProgress && onProgress('加载 tesseract-core.asm.js (5.6MB)...', 0.2);
-    var TesseractCoreASM;
+    // 2. 加载 tesseract-core.asm.js (5.4MB — 用 fetch + Blob + 真实进度 + 180s 超时)
+    onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB, 手机慢网可能需要 30-120s)...', 10);
+    var t0 = Date.now();
+    var coreBytes;
     try {
-      await withTimeout(loadScript(coreAsmUrl), 60000, '加载 core asm.js');
-      // tesseract-core.asm.js 会把自己挂到 TesseractCoreASM 全局变量
-      TesseractCoreASM = window.TesseractCoreASM;
-      if (!TesseractCoreASM) throw new Error('core asm.js 加载但 TesseractCoreASM 未定义');
+      coreBytes = await fetchWithProgress(coreAsmUrl, 'core asm.js', onProgress, 180000);
     } catch (e) {
-      throw new Error('tesseract-core.asm.js 加载失败: ' + e.message);
+      throw new Error('tesseract-core.asm.js 下载失败: ' + e.message +
+        ' (耗时 ' + Math.round((Date.now()-t0)/1000) + 's, 建议在 WiFi 下重试)');
     }
+    console.log('[DictImport] core asm.js 下载完成:', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
 
-    // 3. 等待 Emscripten runtime 初始化
-    onProgress && onProgress('初始化 tesseract runtime...', 0.5);
-    var Module = TesseractCoreASM;
-    await new Promise(function (resolve) {
-      if (Module.calledRun) { resolve(); return; }
-      if (typeof Module.onRuntimeInitialized === 'function') {
-        var oldInit = Module.onRuntimeInitialized;
-        Module.onRuntimeInitialized = function () {
-          if (oldInit) oldInit();
-          resolve();
-        };
-      } else {
-        Module.onRuntimeInitialized = resolve;
-      }
-      // 超时保险
-      setTimeout(resolve, 30000);
+    // Blob URL 注入 script
+    var blob = new Blob([coreBytes], { type: 'text/javascript' });
+    var blobUrl = URL.createObjectURL(blob);
+    await new Promise(function(resolve, reject) {
+      var s = document.createElement('script');
+      s.src = blobUrl;
+      s.onload = resolve;
+      s.onerror = function(){ reject(new Error('core asm.js Blob 注入失败')); };
+      document.head.appendChild(s);
     });
-    // 双保险: 再等一帧, 确保 Module["FS_createDataFile"] 等别名都挂上
-    await new Promise(function(r){ setTimeout(r, 100); });
-    console.log('[DictImport] tesseract-core.asm.js runtime 初始化完成, Module keys:',
-      Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 || k.indexOf('Tess')>=0 }).join(','));
+    setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 30000);
+    var Module = window.TesseractCoreASM;
+    if (!Module) throw new Error('core asm.js 加载但 window.TesseractCoreASM 未定义');
 
-    // 4. 下载 tessdata + gunzip + 写入 MEMFS
-    onProgress && onProgress('下载 tessdata...', 0.6);
-    var langPath = await getTessdataUrl(onProgress);
-    var tdUrl = langPath + '/eng.traineddata.gz';
-    console.log('[DictImport] 下载 tessdata:', tdUrl);
-    var tdResp = await withTimeout(fetch(tdUrl), 60000, 'fetch tessdata');
-    if (!tdResp.ok) throw new Error('tessdata fetch HTTP ' + tdResp.status);
-    var tdBuf = await tdResp.arrayBuffer();
-    onProgress && onProgress('解压 tessdata...', 0.8);
-    var tdData = pako.ungzip(new Uint8Array(tdBuf));
-    console.log('[DictImport] tessdata 解压后大小:', tdData.length, 'bytes');
+    // 3. 等待 Emscripten runtime 初始化 (parse + execute 5.4MB JS)
+    onProgress && onProgress('初始化 tesseract runtime (解析 5.4MB JS)...', 60);
+    try {
+      await new Promise(function (resolve) {
+        if (Module.calledRun) { resolve(); return; }
+        if (typeof Module.onRuntimeInitialized === 'function') {
+          var oldInit = Module.onRuntimeInitialized;
+          Module.onRuntimeInitialized = function () {
+            if (oldInit) oldInit();
+            resolve();
+          };
+        } else {
+          Module.onRuntimeInitialized = resolve;
+        }
+        setTimeout(resolve, 120000); // 给 120s, 手机解析大 JS 可能很慢
+      });
+      await new Promise(function(r){ setTimeout(r, 200); });
+    } catch (e) {
+      throw new Error('Emscripten runtime 初始化超时 (120s)');
+    }
+    console.log('[DictImport] runtime 完成, 耗时累计', Math.round((Date.now()-t0)/1000) + 's');
 
-    // 5. 写入 MEMFS —— 探测 FS API 风格 (新旧 Emscripten 版本不一致)
+    // 4. 探测 FS API
     var fsCreateDataFile = Module.FS_createDataFile ||
       (Module.FS && Module.FS.createDataFile) ||
       (typeof FS !== 'undefined' && FS.createDataFile);
     if (!fsCreateDataFile) {
-      // 手动建文件夹路径再创建文件
-      Module.FS.createPath('/', '');
-      fsCreateDataFile = Module.FS.createDataFile;
+      throw new Error('FS_createDataFile 不可用 (Module keys: ' + Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 }).join(',') + ')');
     }
-    console.log('[DictImport] 使用 FS API:',
-      Module.FS_createDataFile ? 'Module.FS_createDataFile' :
-      (Module.FS && Module.FS.createDataFile) ? 'Module.FS.createDataFile' : 'unknown');
-    fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
 
-    // 6. 创建 TessBaseAPI + Init
-    onProgress && onProgress('初始化 TessBaseAPI...', 0.9);
+    // 5. 下载 tessdata (同源 public/tessdata/eng.traineddata.gz, ~11MB gzip)
+    onProgress && onProgress('下载 tessdata (11MB)...', 70);
+    var tdBytes;
+    try {
+      var tdUrl = getOcrAssetUrl('tessdata/eng.traineddata.gz');
+      tdBytes = await fetchWithProgress(tdUrl, 'tessdata', onProgress, 180000);
+    } catch (e) {
+      throw new Error('tessdata 下载失败: ' + e.message);
+    }
+    onProgress && onProgress('解压 tessdata...', 95);
+    var tdData = pako.ungzip(new Uint8Array(tdBytes));
+    console.log('[DictImport] tessdata 解压:', tdData.length, 'bytes');
+
+    // 6. 写入 MEMFS
+    try {
+      fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
+    } catch (e) {
+      throw new Error('写入 MEMFS 失败: ' + e.message);
+    }
+
+    // 7. TessBaseAPI.Init
+    onProgress && onProgress('初始化 TessBaseAPI (LSTM+Legacy)...', 98);
     var api = new Module.TessBaseAPI();
-    // OEM=1 = LSTM+Legacy, 覆盖范围最广
-    var initResult = api.Init('/', 'eng', 1);
+    var initResult = api.Init('/', 'eng', 1); // OEM=1
     if (initResult !== 0) throw new Error('TessBaseAPI.Init 失败, 返回值=' + initResult);
-    console.log('[DictImport] TessBaseAPI.Init 成功');
 
+    onProgress && onProgress('OCR 引擎就绪 🎉', 100);
+    console.log('[DictImport] ✅ OCR 引擎初始化完成, 累计耗时', Math.round((Date.now()-t0)/1000) + 's');
     ocrModule = { api: api, Module: Module };
     return ocrModule;
   }
@@ -331,7 +385,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.4';
+    var EXPECTED_VER = '1.13.5';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
