@@ -442,7 +442,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.7';
+    var EXPECTED_VER = '1.13.8';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
@@ -541,7 +541,9 @@ App.DictImport = (function () {
         log('⚠️', 'tesseract-core.asm.js 已在内存中', '跳过重复加载');
       }
       var mod = await initDirectOcr(function(label, p) {
-        var pct = Math.round((p || 0) * 100);
+        // 进度值统一约定: 0-100 整数 (initDirectOcr 和 fetchWithProgress 都这么传)
+        // 如果传了 0-1 小数 (旧代码残留), 自动乘 100 兼容
+        var pct = (p || 0) <= 1 && (p || 0) > 0 ? Math.round((p || 0) * 100) : Math.round(p || 0);
         panel.textContent = logs.join('\n') + '\n\n⏳ ' + label + ' (' + pct + '%)';
       });
       log('✅', 'tesseract-core.asm.js 初始化成功', '耗时 ' + (Date.now() - t0) + 'ms · TessBaseAPI=' + typeof mod.api);
@@ -745,9 +747,12 @@ App.DictImport = (function () {
 
         var onOcrProgress = (function (idx, total) {
           return function (label, p) {
-            var pct = Math.round((p || 0) * 100);
-            progress.textContent = '第 ' + (idx + 1) + ' / ' + total + ' 张 · ' + (label || '处理中') + ' ' + pct + '%';
-            if (barFill) barFill.style.width = (((idx / total) + (p || 0) / total) * 100) + '%';
+            // p 是 0-100 整数 (统一约定)
+            var pInt = Math.min(100, Math.max(0, Math.round(p || 0)));
+            progress.textContent = '第 ' + (idx + 1) + ' / ' + total + ' 张 · ' + (label || '处理中') + ' ' + pInt + '%';
+            // 进度条: (已完成张数/total + 当前张的进度/100/total) * 100 = idx*100/total + pInt/total
+            var barPct = Math.min(100, Math.round(((idx / total) + (pInt / 100 / total)) * 100));
+            if (barFill) barFill.style.width = barPct + '%';
           };
         })(i, selectedFiles.length);
 
