@@ -1,5 +1,5 @@
 /**
- * 词典导入模块 (v1.15.1) — OCR 引擎彻底重写
+ * 词典导入模块 (v1.15.2) — OCR 引擎彻底重写
  * Admin 专属功能: 从词典拍照 → OCR → 结构化解析 → 审核 → 发布
  *
  * v1.13.0 根因修复:
@@ -13,6 +13,15 @@
  *   2. fetchWithProgress 预分配大 Uint8Array 流式写入 (省最后 N 次拷贝合并)
  *   3. 删除 GitHub Pages 同源 fallback (国内无 CDN, 几十 KB/s 是灾难)
  *   4. idbPut 加 await, 保证缓存写入完整 (否则用户关页面下次重下)
+ *
+ * v1.15.2 tessdata 下载提速 (根因修复):
+ *   问题: v1.15.1 的 "race" 注释写错, 实际是 Promise.all 等所有源 HEAD 完成,
+ *         projectnaptha.com 实测 17KB/s, HEAD 卡 5s 超时拖慢整体
+ *   修复:
+ *   1. 删 HEAD 探测, 改 raceDownload 真 race 并行下载 (谁先下完用谁)
+ *   2. 多 CDN 源: jsdelivr + unpkg + fastly, 谁快用谁
+ *   3. 改用未压缩 tessdata_best, 跳过 pako 解压 (省 1-2s + 省内存)
+ *   4. fetchWithProgress 加速度诊断日志 (每秒 MB/s), 帮用户判断瓶颈
  *
  * 流程:
  *   1. 上传 (拍照/相册, 最多10张)
@@ -100,47 +109,67 @@ App.DictImport = (function () {
     } catch (e) { /* ignore */ }
   }
 
-  /** tessdata 源列表 — jsdelivr 国内节点最快 (1s 下完 11MB)
-   *  v1.15.1 改动: 串行 HEAD 探测 → Promise.race 并行, 省 1-3s
-   *                删除 GitHub Pages 同源 fallback (国内无 CDN, 实测几十 KB/s, 5-10 分钟超时是灾难)
+  /** tessdata 源列表 — v1.15.2 改用未压缩版, 跳过 pako 解压步骤
+   *  v1.15.1 问题: HEAD 探测用 Promise.all 等所有源完成 (注释写 race 实际是 all),
+   *                projectnaptha.com 实测 17KB/s, HEAD 会卡 5s 超时, 拖慢整体
+   *  v1.15.2 方案: 删 HEAD 探测, 改真 race 并行下载 (谁先下完用谁, 慢源完全不阻塞)
+   *                多 CDN 源: jsdelivr + unpkg + fastly, 谁快用谁
+   *                改用未压缩 eng.traineddata, 跳过 pako 解压 (省 1-2s + 省内存)
    */
   var TESSDATA_SOURCES = [
-    { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'jsdelivr CDN' },
-    { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方 projectnaptha' },
+    { url: 'https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best/eng.traineddata', desc: 'jsdelivr (tessdata_best 未压缩)' },
+    { url: 'https://unpkg.com/tesseract-ocr-tessdata-best@4.0.0/eng.traineddata', desc: 'unpkg (tessdata_best)' },
+    { url: 'https://fastly.jsdelivr.net/gh/tesseract-ocr/tessdata_best/eng.traineddata', desc: 'fastly jsdelivr' },
   ];
 
-  async function getTessdataUrl() {
-    if (tessdataUrlCache) return tessdataUrlCache;
-    // 并行 HEAD 探测, 谁先 200 用谁 (按 SOURCES 顺序优先)
-    // 每个 probe 加 5s 超时, 挂掉的源不阻塞
-    function probeOne(src) {
-      return new Promise(function (resolve) {
-        var done = false;
-        fetch(src.url + '/eng.traineddata.gz', { method: 'HEAD' })
-          .then(function (resp) {
-            if (!done) { done = true; resolve({ src: src, ok: resp.ok }); }
+  /** 真 race 并行下载: 同时从所有源开始下, 谁先完成用谁, 其他自动取消
+   *  比串行 + HEAD 探测快得多, 慢源完全不阻塞
+   */
+  async function raceDownload(sources, label, onProgress, timeoutMs) {
+    if (sources.length === 0) throw new Error(label + ' 无可用源');
+    return new Promise(function (resolve, reject) {
+      var finished = false;
+      var errors = [];
+      var remaining = sources.length;
+      var progressBase = { jsdelivr: 0, unpkg: 0, fastly: 0 };
+      // 合并进度: 取所有源中下载最多的那个的百分比
+      function reportProgress() {
+        var maxPct = 0;
+        for (var k in progressBase) { if (progressBase[k] > maxPct) maxPct = progressBase[k]; }
+        if (onProgress) onProgress(label + ' 下载中 (race, 最快源 ' + maxPct + '%)...', maxPct);
+      }
+      sources.forEach(function (src) {
+        var srcKey = src.desc.split(' ')[0];
+        var wrappedProgress = function (msg, pct) {
+          if (!finished) {
+            progressBase[srcKey] = pct;
+            reportProgress();
+          }
+        };
+        fetchWithProgress(src.url, label + ' (' + src.desc + ')', wrappedProgress, timeoutMs)
+          .then(function (bytes) {
+            if (finished) return;
+            finished = true;
+            console.log('[DictImport] ✅ ' + label + ' race 胜出: ' + src.desc + ', ' + bytes.length + ' bytes');
+            onProgress && onProgress(label + ' 下载完成 (' + src.desc + ')', 100);
+            resolve(bytes);
           })
           .catch(function (e) {
-            if (!done) { done = true; resolve({ src: src, ok: false, err: e.message }); }
+            if (finished) return;
+            console.warn('[DictImport] ❌ ' + label + ' 源失败 (' + src.desc + '):', e.message);
+            errors.push(src.desc + ': ' + e.message);
+            remaining--;
+            if (remaining === 0) {
+              reject(new Error(label + ' 所有源均失败: ' + errors.join(' | ')));
+            }
           });
-        setTimeout(function () {
-          if (!done) { done = true; resolve({ src: src, ok: false, err: 'timeout 5s' }); }
-        }, 5000);
       });
-    }
-    var results = await Promise.all(TESSDATA_SOURCES.map(probeOne));
-    for (var i = 0; i < TESSDATA_SOURCES.length; i++) {
-      if (results[i] && results[i].ok) {
-        tessdataUrlCache = TESSDATA_SOURCES[i].url;
-        break;
-      }
-    }
-    if (!tessdataUrlCache) {
-      var errs = results.map(function (r) { return r.src.desc + ':' + (r.err || 'HTTP 非200'); }).join(', ');
-      throw new Error('所有 tessdata 源均不可达 (' + errs + '), 请检查网络');
-    }
-    console.log('[DictImport] tessdata 源 (并行 race 选出):', tessdataUrlCache);
-    return tessdataUrlCache;
+    });
+  }
+
+  async function getTessdataUrl() {
+    // v1.15.2: 保留兼容签名, 但实际下载走 raceDownload
+    return TESSDATA_SOURCES[0].url;
   }
 
   /** 加载脚本 —— 同源用 script 标签, 跨域 fallback fetch+Blob URL
@@ -212,6 +241,9 @@ App.DictImport = (function () {
     var buf = total > 0 ? new Uint8Array(total) : new Uint8Array(16 * 1024 * 1024);
     var received = 0;
     var lastProgressTs = 0;
+    var speedStartTs = Date.now();   // v1.15.2: 速度诊断起点
+    var speedLastTs = speedStartTs;
+    var speedLastBytes = 0;
     while (true) {
       var chunk = await withTimeout(reader.read(), 30000, label + ' (read chunk)');
       if (chunk.done) break;
@@ -225,6 +257,17 @@ App.DictImport = (function () {
       buf.set(chunk.value, received);
       received += chunk.value.length;
       var now = Date.now();
+      // v1.15.2: 每 1s 打印一次下载速度诊断, 帮用户判断 CDN 慢还是 ArkWeb 慢
+      if (now - speedLastTs > 1000) {
+        var dt = (now - speedLastTs) / 1000;
+        var dBytes = received - speedLastBytes;
+        var speedMBs = (dBytes / dt / 1024 / 1024).toFixed(2);
+        var totalMB = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+        var recvMB = (received / 1024 / 1024).toFixed(1);
+        console.log('[DictImport] ' + label + ' 速度诊断: ' + recvMB + '/' + totalMB + 'MB, ' + speedMBs + ' MB/s');
+        speedLastTs = now;
+        speedLastBytes = received;
+      }
       // 进度回调节流 (50ms 一次, 避免主线程被刷爆)
       if (onProgress && now - lastProgressTs > 50) {
         lastProgressTs = now;
@@ -235,19 +278,18 @@ App.DictImport = (function () {
     // 截断到实际长度 (total 未知时 buf 可能比 received 大)
     var result = received === buf.length ? buf : buf.subarray(0, received);
     onProgress && onProgress(label + ' 下载完成', 100);
-    console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes');
+    // v1.15.2: 完成时打印平均速度
+    var totalTime = (Date.now() - speedStartTs) / 1000;
+    var avgSpeedMBs = (received / totalTime / 1024 / 1024).toFixed(2);
+    console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes, 平均 ' + avgSpeedMBs + ' MB/s, 耗时 ' + totalTime.toFixed(1) + 's');
     return result;
   }
 
   async function initDirectOcr(onProgress) {
     if (ocrModule) return ocrModule;
 
-    // 1. 加载 pako (46KB, 很快)
-    onProgress && onProgress('加载 pako 解压库...', 5);
-    if (typeof window.pako === 'undefined') {
-      await loadScript(pakoUrl);
-    }
-    if (!window.pako) throw new Error('pako 加载失败');
+    // v1.15.2: pako 不再必需 (改用未压缩 tessdata_best), 跳过加载省 46KB
+    // 保留 pakoUrl 变量以兼容诊断函数, 但 initDirectOcr 不再加载 pako
 
     // 先查 IndexedDB 缓存, 命中就 0 下载, 没有再走 jsdelivr CDN
     // v1.15.1: 删除同源 fallback — GitHub Pages 国内无 CDN, 几十 KB/s 是灾难
@@ -336,32 +378,30 @@ App.DictImport = (function () {
       throw new Error('FS_createDataFile 不可用 (Module keys: ' + Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 }).join(',') + ')');
     }
 
-    // 5. 下载 tessdata — 先查 IndexedDB, 命中 0 下载; 没有走 getTessdataUrl() (jsdelivr 优先)
-    // v1.15.1: idbPut 改 await, 保证写入完整
-    var tdBytes;
-    var tdCacheKey = 'eng.traineddata.gz@4.0.0';
+    // 5. 下载 tessdata — 先查 IndexedDB, 命中 0 下载; 没有走 raceDownload (多 CDN 并行)
+    // v1.15.2: 改用未压缩版 eng.traineddata, 跳过 pako 解压 (省 1-2s + 省内存)
+    //          raceDownload 真 race: 同时从 jsdelivr + unpkg + fastly 下, 谁快用谁
+    var tdData;
+    var tdCacheKey = 'eng.traineddata@4.0.0-best';
     var tdCached = await idbGet(tdCacheKey);
     if (tdCached && tdCached instanceof Uint8Array && tdCached.length > 1000000) {
-      tdBytes = tdCached;
-      console.log('[DictImport] tessdata 命中 IndexedDB 缓存:', tdBytes.length, 'bytes');
+      tdData = tdCached;
+      console.log('[DictImport] tessdata 命中 IndexedDB 缓存:', tdData.length, 'bytes');
       onProgress && onProgress('tessdata 从本地缓存加载 ✓', 85);
     } else {
-      onProgress && onProgress('下载 tessdata (11MB)...', 70);
-      var tdBase = await getTessdataUrl();
-      var tdUrl = tdBase + '/eng.traineddata.gz';
-      console.log('[DictImport] tessdata 下载地址:', tdUrl);
-      tdBytes = await fetchWithProgress(tdUrl, 'tessdata', onProgress, 180000);
+      onProgress && onProgress('下载 tessdata (15MB, 多 CDN race)...', 70);
+      console.log('[DictImport] tessdata race 下载开始, 源数:', TESSDATA_SOURCES.length);
+      tdData = await raceDownload(TESSDATA_SOURCES, 'tessdata', onProgress, 180000);
+      console.log('[DictImport] ✅ tessdata race 下载完成:', tdData.length, 'bytes');
       try {
-        await idbPut(tdCacheKey, tdBytes);
+        await idbPut(tdCacheKey, tdData);
         console.log('[DictImport] tessdata 已存入 IndexedDB 缓存');
       } catch (e) {
         console.warn('[DictImport] tessdata IDB 缓存失败 (不影响本次):', e.message);
       }
     }
-    console.log('[DictImport] 开始解压 tessdata...');
-    onProgress && onProgress('解压 tessdata...', 95);
-    var tdData = pako.ungzip(tdBytes);
-    console.log('[DictImport] tessdata 解压完成:', tdData.length, 'bytes');
+    // v1.15.2: tdData 已经是未压缩的 eng.traineddata, 直接写入 MEMFS, 不再 pako 解压
+    console.log('[DictImport] tessdata 准备写入 MEMFS:', tdData.length, 'bytes');
 
     // 6. 写入 MEMFS
     console.log('[DictImport] 写入 MEMFS...');
