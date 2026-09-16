@@ -50,13 +50,35 @@ App.DictImport = (function () {
     return tessdataUrlCache;
   }
 
+  /** 通过 fetch + Blob URL 注入远程脚本
+   *  根因: ArkWeb/鸿蒙浏览器对 <script> 标签跨域加载 + Content-Type (配合 nosniff 头) 校验更严格
+   *  jsdelivr 返回 application/javascript + nosniff, ArkWeb 上 <script> 标签可能静默失败或挂起
+   *  但 fetch 时 CORS 是 ok 的 (access-control-allow-origin: *), 所以 fetch 下载内容后用 Blob URL 注入
+   *  绕过所有跨域/MIME/nosniff 限制
+   */
   function loadScript(url) {
     return new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = url;
-      s.onload = resolve;
-      s.onerror = function () { reject(new Error('脚本加载失败: ' + url)); };
-      document.head.appendChild(s);
+      fetch(url, { credentials: 'omit' }).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.blob();
+      }).then(function (blob) {
+        var blobUrl = URL.createObjectURL(blob);
+        var script = document.createElement('script');
+        script.src = blobUrl;
+        script.onload = function () {
+          // 不能立即 revoke, Emscripten runtime 初始化需要异步读取
+          // 给个宽限期
+          setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
+          resolve();
+        };
+        script.onerror = function () {
+          URL.revokeObjectURL(blobUrl);
+          reject(new Error('Blob URL 脚本加载失败: ' + url));
+        };
+        document.head.appendChild(script);
+      }).catch(function (e) {
+        reject(new Error('脚本 fetch 失败: ' + url + ' — ' + e.message));
+      });
     });
   }
 
