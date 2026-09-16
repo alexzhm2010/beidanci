@@ -31,9 +31,25 @@ App.DictImport = (function () {
   var ocrModule = null;   // { api, Module } 初始化成功后存 TessBaseAPI 实例
   var ocrInitError = null;
   var tessdataUrlCache = null;
+
+  /** 从当前 location 推算同源资源的正确 base path
+   *  适配场景: dev server / GitHub Pages 子路径 / 任意静态托管
+   *  例: https://alexzhm2010.github.io/beidanci/ + pako.min.js → '/beidanci/pako.min.js'
+   *      http://localhost:5174/ + pako.min.js → '/pako.min.js'
+   */
+  function getOcrAssetUrl(assetName) {
+    var path = location.pathname;
+    if (!path.endsWith('/')) {
+      var lastSlash = path.lastIndexOf('/');
+      path = path.substring(0, lastSlash + 1);
+    }
+    return path + assetName;
+  }
+
   // 同源静态资源 — 已打包进 public/, 极速 + 零 CORS 问题
-  var pakoUrl = '/pako.min.js';
-  var coreAsmUrl = '/tesseract-core.asm.js';
+  // 动态适配部署 base path
+  var pakoUrl = getOcrAssetUrl('pako.min.js');
+  var coreAsmUrl = getOcrAssetUrl('tesseract-core.asm.js');
 
   /** 探测 tessdata 最佳来源 */
   async function getTessdataUrl(onProgress) {
@@ -315,7 +331,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.3';
+    var EXPECTED_VER = '1.13.4';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
