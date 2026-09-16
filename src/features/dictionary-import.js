@@ -267,9 +267,35 @@ App.DictImport = (function () {
     if (typeof factory !== 'function') throw new Error('core asm.js 加载但 TesseractCoreASM 不是函数, 而是: ' + typeof factory);
     console.log('[DictImport] TesseractCoreASM 是工厂函数, 调用...');
     var Module = factory({}); // 传入空配置对象
+    // ⚠️ tesseract-core.asm.js 工厂内部把 UTF8ToString 等当全局用, 但只挂在 Module 上
+    // 必须手动提升到全局, 否则 GetUTF8Text() 内部调 UTF8ToString 会 ReferenceError
+    // 先探测 Module 上有没有这些函数, 有就提升; 没有就自己实现 UTF8ToString
+    if (typeof Module.UTF8ToString === 'function') window.UTF8ToString = Module.UTF8ToString;
+    if (typeof Module.UTF8ArrayToString === 'function') window.UTF8ArrayToString = Module.UTF8ArrayToString;
+    if (typeof Module.intArrayToString === 'function') window.intArrayToString = Module.intArrayToString;
+    if (typeof Module.stringToUTF8 === 'function') window.stringToUTF8 = Module.stringToUTF8;
+    if (typeof Module.allocateUTF8 === 'function') window.allocateUTF8 = Module.allocateUTF8;
+    // 兜底: 如果 Module.UTF8ToString 不存在, 自己实现一个从内存指针读 C 字符串
+    if (typeof window.UTF8ToString !== 'function') {
+      window.UTF8ToString = function(ptr) {
+        if (!ptr) return '';
+        var heap = Module.HEAPU8;
+        var end = ptr;
+        while (heap[end] !== 0) end++;
+        var bytes = heap.slice(ptr, end);
+        try {
+          return new TextDecoder('utf-8').decode(bytes);
+        } catch (e) {
+          // TextDecoder 不支持? 手动解码 ASCII fallback
+          var out = '';
+          for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+          return out;
+        }
+      };
+      console.warn('[DictImport] UTF8ToString 未从 Module 暴露, 使用自定义实现');
+    }
     console.log('[DictImport] Module 初始化完成, keys 数量:', Object.keys(Module).length,
-      'FS_createDataFile:', typeof Module.FS_createDataFile,
-      'FS.createDataFile:', !!(Module.FS && Module.FS.createDataFile),
+      'UTF8ToString:', typeof window.UTF8ToString,
       'TessBaseAPI:', typeof Module.TessBaseAPI);
 
     // 4. 探测 FS API
@@ -445,7 +471,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.9';
+    var EXPECTED_VER = '1.13.10';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
