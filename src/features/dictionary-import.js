@@ -169,41 +169,18 @@ App.DictImport = (function () {
   /** 直接初始化 tesseract-core.asm.js + tessdata
    *  完全不碰 Worker/WASM, 主线程调 Emscripten API
    */
-  /** fetch 下载 + 进度回调 + 超时控制
-   *  比 fetch + .arrayBuffer() 好在能实时显示进度百分比
+  /** fetch 下载 (简单版, 不用 ReadableStream — ArkWeb 对 stream reader 支持有坑)
+   *  jsdelivr CDN 1s 就能下完, 不需要进度条
    */
   async function fetchWithProgress(url, label, onProgress, timeoutMs) {
     timeoutMs = timeoutMs || 180000;
+    onProgress && onProgress(label + ' 下载中...', 50);
     var resp = await withTimeout(fetch(url), timeoutMs, label + ' (fetch)');
     if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
-    var total = parseInt(resp.headers.get('content-length'), 10) || 0;
-    var reader = resp.body.getReader();
-    var chunks = [];
-    var received = 0;
-    while (true) {
-      var { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (total > 0 && onProgress) {
-        var pct = Math.round((received / total) * 100);
-        onProgress(label + ' 下载中...', pct);
-      }
-    }
-    // 合并 chunks
-    var result;
-    if (chunks.length === 0) {
-      result = new Uint8Array(0);
-    } else if (chunks.length === 1) {
-      result = chunks[0];
-    } else {
-      var totalLen = 0;
-      chunks.forEach(function(c){ totalLen += c.length; });
-      result = new Uint8Array(totalLen);
-      var off = 0;
-      chunks.forEach(function(c){ result.set(c, off); off += c.length; });
-    }
-    if (onProgress) onProgress(label + ' 下载完成', 100);
+    var buf = await withTimeout(resp.arrayBuffer(), timeoutMs, label + ' (read body)');
+    var result = new Uint8Array(buf);
+    onProgress && onProgress(label + ' 下载完成', 100);
+    console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes');
     return result;
   }
 
@@ -238,7 +215,12 @@ App.DictImport = (function () {
         try {
           coreBytes = await fetchWithProgress(coreSrcList[ci].url, 'core asm.js (' + coreSrcList[ci].desc + ')', onProgress, 180000);
           console.log('[DictImport] ✅ core asm.js 下载完成 (' + coreSrcList[ci].desc + '):', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
-          await idbPut(coreCacheKey, coreBytes);
+          // idbPut 不 await, 后台存缓存
+          idbPut(coreCacheKey, coreBytes).then(function() {
+            console.log('[DictImport] core asm.js 已存入 IndexedDB 缓存');
+          }).catch(function(e) {
+            console.warn('[DictImport] core asm.js IDB 缓存失败:', e.message);
+          });
           coreErr = null;
           break;
         } catch (e) {
@@ -320,20 +302,29 @@ App.DictImport = (function () {
       var tdUrl = tdBase + '/eng.traineddata.gz';
       console.log('[DictImport] tessdata 下载地址:', tdUrl);
       tdBytes = await fetchWithProgress(tdUrl, 'tessdata', onProgress, 180000);
-      await idbPut(tdCacheKey, tdBytes);
+      // idbPut 不 await, 后台存缓存, 不阻塞主流程
+      idbPut(tdCacheKey, tdBytes).then(function() {
+        console.log('[DictImport] tessdata 已存入 IndexedDB 缓存');
+      }).catch(function(e) {
+        console.warn('[DictImport] tessdata IDB 缓存失败:', e.message);
+      });
     }
+    console.log('[DictImport] 开始解压 tessdata...');
     onProgress && onProgress('解压 tessdata...', 95);
-    var tdData = pako.ungzip(new Uint8Array(tdBytes));
-    console.log('[DictImport] tessdata 解压:', tdData.length, 'bytes');
+    var tdData = pako.ungzip(tdBytes);
+    console.log('[DictImport] tessdata 解压完成:', tdData.length, 'bytes');
 
     // 6. 写入 MEMFS
+    console.log('[DictImport] 写入 MEMFS...');
     try {
       fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
+      console.log('[DictImport] MEMFS 写入成功');
     } catch (e) {
       throw new Error('写入 MEMFS 失败: ' + e.message);
     }
 
     // 7. TessBaseAPI.Init
+    console.log('[DictImport] TessBaseAPI.Init...');
     onProgress && onProgress('初始化 TessBaseAPI (LSTM+Legacy)...', 98);
     var api = new Module.TessBaseAPI();
     var initResult = api.Init('/', 'eng', 1); // OEM=1
@@ -471,7 +462,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.10';
+    var EXPECTED_VER = '1.13.11';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
