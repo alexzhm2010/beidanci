@@ -14,7 +14,164 @@ window.App = window.App || {};
 App.DictImport = (function () {
 
   var MAX_PAGES = 10;
+
+  // ========== OCR 引擎 (对齐 library.js 成熟实现) ==========
   var ocrWorker = null;
+  var ocrInitError = null;
+  var tessdataUrlCache = null;
+
+  /** 探测 tessdata 最佳来源 (本地 → CDN → 官方) */
+  async function getTessdataUrl(onProgress) {
+    if (tessdataUrlCache) return tessdataUrlCache;
+    var candidates = [
+      { url: './tessdata', desc: '本地' },
+      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'CDN镜像' },
+      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方源' }
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        onProgress && onProgress('检查' + candidates[i].desc + 'OCR语言包...', 0);
+        var resp = await fetch(candidates[i].url + '/eng.traineddata.gz', { method: 'HEAD' });
+        if (resp.ok) { tessdataUrlCache = candidates[i].url; return tessdataUrlCache; }
+      } catch (e) { /* 下一个 */ }
+    }
+    throw new Error('所有OCR语言包来源均不可用, 请检查网络');
+  }
+
+  /** File → Canvas (等比缩放, 手机大图安全) */
+  function fileToCanvas(file, maxEdge) {
+    maxEdge = maxEdge || 2400;
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('图片读取失败')); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('图片解码失败')); };
+        img.onload = function () {
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = Math.min(1, maxEdge / Math.max(w, h));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale);
+          canvas.height = Math.round(h * scale);
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** 图像预处理: 灰度化 + 对比度增强 + 二值化 (提升词典印刷体识别率) */
+  function preprocessImage(canvas) {
+    var w = canvas.width, h = canvas.height;
+    var ctx = canvas.getContext('2d');
+    var imageData = ctx.getImageData(0, 0, w, h);
+    var data = imageData.data;
+    var gray = new Uint8ClampedArray(w * h);
+    var sum = 0;
+    for (var i = 0, j = 0; i < data.length; i += 4, j++) {
+      gray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+      sum += gray[j];
+    }
+    var avg = sum / gray.length;
+    var contrast = 1.8;
+    var out = ctx.createImageData(w, h);
+    var outData = out.data;
+    var threshold = avg * 0.7;
+    for (var n = 0; n < gray.length; n++) {
+      var val = gray[n] > threshold ? 255 : 0;
+      outData[n * 4] = val; outData[n * 4 + 1] = val; outData[n * 4 + 2] = val; outData[n * 4 + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+    return canvas;
+  }
+
+  async function ensureTesseract() {
+    if (window.Tesseract) return window.Tesseract;
+    await new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
+      s.onload = function () {
+        if (window.Tesseract) resolve();
+        else reject(new Error('Tesseract.js 已加载但 Tesseract 未定义'));
+      };
+      s.onerror = function () { reject(new Error('Tesseract.js 加载失败, 请检查网络')); };
+      document.head.appendChild(s);
+    });
+    return window.Tesseract;
+  }
+
+  /** OCR 单张页面图片, 返回完整文本 (多 PSM 策略, 自动预处理) */
+  async function ocrImage(file, onProgress) {
+    var Tesseract = await ensureTesseract();
+    if (typeof Tesseract === 'undefined') throw new Error('OCR 引擎加载失败');
+
+    if (!ocrWorker) {
+      if (ocrInitError) throw ocrInitError;
+      try {
+        var langPath = await getTessdataUrl(onProgress);
+        ocrWorker = await Tesseract.createWorker('eng', 1, {
+          langPath: langPath,
+          logger: function (m) {
+            var p = m.progress || 0;
+            var map = {
+              'loading tesseract core': '加载OCR核心',
+              'initializing tesseract': '初始化OCR引擎',
+              'loading language traineddata': '加载语言包',
+              'initializing api': '初始化API',
+              'recognizing text': '识别中'
+            };
+            var label = map[m.status] || m.status || '处理中';
+            if (p - (ocrWorker.__lastP || 0) > 0.08 || p >= 0.999) {
+              ocrWorker.__lastP = p;
+              onProgress && onProgress(label, p);
+            }
+          }
+        });
+      } catch (e) {
+        ocrInitError = e;
+        console.error('[DictImport] OCR Worker 创建失败', e);
+        throw new Error('OCR引擎初始化失败: ' + (e.message || e));
+      }
+    }
+
+    onProgress && onProgress('准备图片...', 0);
+    var canvas = await fileToCanvas(file);
+    preprocessImage(canvas);
+
+    // 策略1: PSM 6 (统一文本块, 适合整页词典)
+    var text = '';
+    try {
+      onProgress && onProgress('识别中 (PSM6)...', 0);
+      var r1 = await ocrWorker.recognize(canvas, { tessedit_pageseg_mode: '6' });
+      text = (r1.data && r1.data.text || '').trim();
+    } catch (e) { console.warn('[DictImport] PSM6 失败', e.message); }
+
+    // 策略2: PSM 6 结果太短时用 PSM 11 (稀疏文本)
+    if (text.length < 30) {
+      try {
+        onProgress && onProgress('识别中 (PSM11)...', 0);
+        var r2 = await ocrWorker.recognize(canvas, { tessedit_pageseg_mode: '11' });
+        var t2 = (r2.data && r2.data.text || '').trim();
+        if (t2.length > text.length) text = t2;
+      } catch (e2) { /* 保持 text 不变 */ }
+    }
+
+    return text;
+  }
+
+  /** 批次结束后调用, 释放 Worker 内存 */
+  async function closeOcrWorker() {
+    if (ocrWorker) {
+      try { await ocrWorker.terminate(); } catch (e) {}
+      ocrWorker = null;
+      ocrInitError = null;
+    }
+  }
 
   // ========== HTML 模板 ==========
   function containerHtml() {
@@ -142,12 +299,20 @@ App.DictImport = (function () {
         var file = selectedFiles[i];
         var progress = document.getElementById('parseProgress');
         var barFill = document.getElementById('parseBarFill');
-        progress.textContent = 'OCR 识别第 ' + (i + 1) + ' / ' + selectedFiles.length + ' 张...';
+        progress.textContent = '准备识别第 ' + (i + 1) + ' / ' + selectedFiles.length + ' 张...';
         if (barFill) barFill.style.width = ((i / selectedFiles.length) * 100) + '%';
+
+        var onOcrProgress = (function (idx, total) {
+          return function (label, p) {
+            var pct = Math.round((p || 0) * 100);
+            progress.textContent = '第 ' + (idx + 1) + ' / ' + total + ' 张 · ' + (label || '处理中') + ' ' + pct + '%';
+            if (barFill) barFill.style.width = (((idx / total) + (p || 0) / total) * 100) + '%';
+          };
+        })(i, selectedFiles.length);
 
         // OCR
         var ocrStart = Date.now();
-        var ocrText = await ocrImage(file);
+        var ocrText = await ocrImage(file, onOcrProgress);
         var ocrDur = Date.now() - ocrStart;
 
         // 解析
@@ -234,42 +399,24 @@ App.DictImport = (function () {
       container.innerHTML = (
         '<div style="text-align:center;padding:40px 20px;">' +
           '<div style="font-size:16px;font-weight:600;margin-bottom:12px;color:var(--color-danger);">识别失败</div>' +
-          '<div style="color:var(--color-text-light);font-size:13px;margin-bottom:20px;">' + App.Utils.escapeHtml(e.message) + '</div>' +
+          '<div style="color:var(--color-text-light);font-size:13px;margin-bottom:20px;line-height:1.6;">' + App.Utils.escapeHtml(e.message) + '</div>' +
+          '<div style="color:var(--color-muted);font-size:12px;margin-bottom:16px;">' +
+            (navigator.userAgent && /Mobile|Android|iPhone|iPad/.test(navigator.userAgent)
+              ? '提示: 手机端建议使用较新的 Chrome/Safari 浏览器, 确保相册图片清晰且光线充足'
+              : '提示: 请确认词典图片清晰且光线充足') +
+          '</div>' +
           '<button class="btn btn-primary" onclick="App.DictImport.retry()">重试</button>' +
         '</div>'
       );
       window._dictRetry = showUpload;
-      App.showToast('识别失败: ' + e.message, 'error');
+      App.showToast('识别失败: ' + e.message, 'error', 5000);
+    } finally {
+      await closeOcrWorker();
     }
   }
 
   function retry() {
     if (window._dictRetry) { window._dictRetry(); window._dictRetry = null; }
-  }
-
-  // ========== Step 2a: OCR (Tesseract.js) ==========
-  async function ocrImage(file) {
-    var Tesseract = await ensureTesseract();
-    if (typeof Tesseract === 'undefined') throw new Error('Tesseract.js 加载失败');
-    if (!ocrWorker) {
-      ocrWorker = await Tesseract.createWorker('eng', 1, {
-        logger: function () { /* 静默 */ },
-      });
-    }
-    var result = await ocrWorker.recognize(file);
-    return result.data.text || '';
-  }
-
-  async function ensureTesseract() {
-    if (window.Tesseract) return window.Tesseract;
-    await new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
-      s.onload = resolve;
-      s.onerror = function () { reject(new Error('Tesseract.js 加载失败')); };
-      document.head.appendChild(s);
-    });
-    return window.Tesseract;
   }
 
   // ========== Step 2b: 词典解析 (排版规则) ==========
