@@ -65,7 +65,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.16.0',
+  APP_VERSION: '1.16.1',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

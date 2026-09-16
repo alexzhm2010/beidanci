@@ -38,6 +38,118 @@ App.DictImport = (function () {
 
   var MAX_PAGES = 10;
 
+  // ========== 调试日志系统 (手机可见, 可复制) ==========
+  // 收集所有日志, 在 UI 调试面板显示 + console.log
+  var debugLogs = [];
+  var debugPanelEl = null;
+
+  /**
+   * 记录日志, 同时:
+   *   1. console.log (PC 调试)
+   *   2. 推入 debugLogs 数组
+   *   3. 如果调试面板已挂载, 实时更新显示
+   * @param {string} icon - 图标 emoji
+   * @param {string} tag - 模块标签 (OCR/UPLOAD/EDGE...)
+   * @param {string} msg - 消息
+   * @param {*} detail - 可选详情 (对象会 JSON 序列化, 字符串超 200 截断)
+   */
+  function addLog(icon, tag, msg, detail) {
+    var ts = new Date();
+    var hh = String(ts.getHours()).padStart(2, '0');
+    var mm = String(ts.getMinutes()).padStart(2, '0');
+    var ss = String(ts.getSeconds()).padStart(2, '0');
+    var ms = String(ts.getMilliseconds()).padStart(3, '0');
+    var line = '[' + hh + ':' + mm + ':' + ss + '.' + ms + '] ' + icon + ' [' + tag + '] ' + msg;
+    if (detail !== undefined) {
+      var detailStr = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      if (detailStr && detailStr.length > 500) detailStr = detailStr.slice(0, 500) + '...(' + (typeof detail === 'string' ? detail.length : JSON.stringify(detail).length) + '字符)';
+      line += '\n  └─ ' + detailStr;
+    }
+    debugLogs.push(line);
+    if (debugLogs.length > 200) debugLogs.shift(); // 上限 200 行, 防内存膨胀
+    console.log('[DictImport]', line);
+    if (debugPanelEl) {
+      debugPanelEl.textContent = debugLogs.join('\n') + '\n\n(实时日志, 滑到底部查看最新)';
+      debugPanelEl.scrollTop = debugPanelEl.scrollHeight;
+    }
+  }
+
+  /** 渲染调试面板 (含复制按钮) */
+  function renderDebugPanel() {
+    var html =
+      '<div style="margin-top:12px;border:1px dashed var(--color-border);border-radius:8px;overflow:hidden;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--color-bg);border-bottom:1px solid var(--color-border);">' +
+          '<span style="font-size:12px;font-weight:600;color:var(--color-text-light);">🔍 调试日志 (实时)</span>' +
+          '<div>' +
+            '<button class="btn btn-outline btn-sm" id="btnCopyLog" style="font-size:11px;padding:2px 8px;">📋 复制</button>' +
+            '<button class="btn btn-outline btn-sm" id="btnClearLog" style="font-size:11px;padding:2px 8px;margin-left:4px;">🗑 清空</button>' +
+          '</div>' +
+        '</div>' +
+        '<pre id="debugLogPre" style="margin:0;padding:8px 10px;font-family:monospace;font-size:11px;line-height:1.5;max-height:240px;overflow-y:auto;background:#fafafa;color:#333;white-space:pre-wrap;word-break:break-all;">(暂无日志)</pre>' +
+      '</div>';
+    return html;
+  }
+
+  /** 挂载调试面板并绑定按钮 */
+  function mountDebugPanel() {
+    var existing = document.getElementById('debugLogPre');
+    if (existing) {
+      debugPanelEl = existing;
+      debugPanelEl.textContent = debugLogs.join('\n') + '\n\n(实时日志, 滑到底部查看最新)';
+      debugPanelEl.scrollTop = debugPanelEl.scrollHeight;
+      bindDebugButtons();
+      return;
+    }
+    // 在上传页 actions 之后插入
+    var actions = document.getElementById('dictImportActions');
+    var container = document.getElementById('dictImportContainer');
+    var mountAt = actions || container;
+    if (!mountAt) return;
+    // 创建 wrapper div
+    var wrapper = document.createElement('div');
+    wrapper.innerHTML = renderDebugPanel();
+    mountAt.parentNode.insertBefore(wrapper.firstChild, mountAt.nextSibling);
+    debugPanelEl = document.getElementById('debugLogPre');
+    if (debugPanelEl) {
+      debugPanelEl.textContent = debugLogs.join('\n') + '\n\n(实时日志, 滑到底部查看最新)';
+      debugPanelEl.scrollTop = debugPanelEl.scrollHeight;
+    }
+    bindDebugButtons();
+  }
+
+  function bindDebugButtons() {
+    var copyBtn = document.getElementById('btnCopyLog');
+    var clearBtn = document.getElementById('btnClearLog');
+    if (copyBtn && !copyBtn._bound) {
+      copyBtn._bound = true;
+      copyBtn.onclick = function () {
+        var text = debugLogs.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            copyBtn.textContent = '✅ 已复制'; setTimeout(function () { copyBtn.textContent = '📋 复制'; }, 2000);
+          }).catch(function () { fallbackCopy(text, copyBtn); });
+        } else { fallbackCopy(text, copyBtn); }
+      };
+    }
+    if (clearBtn && !clearBtn._bound) {
+      clearBtn._bound = true;
+      clearBtn.onclick = function () {
+        debugLogs = [];
+        if (debugPanelEl) debugPanelEl.textContent = '(已清空)';
+      };
+    }
+  }
+
+  function fallbackCopy(text, btn) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); btn.textContent = '✅ 已复制'; }
+    catch (e) { btn.textContent = '❌ 复制失败, 请手动长按选中'; }
+    setTimeout(function () { btn.textContent = '📋 复制'; }, 2000);
+    document.body.removeChild(ta);
+  }
+
   // ========== OCR 引擎: v1.16.0 改用百度 OCR (Edge Function) ==========
   //   v1.13.x 问题: Tesseract.js 在 ArkWeb 上 Worker/WASM 有坑, 5.4MB 下载慢,
   //                 LSTM 初始化卡死, 11MB tessdata race 后还卡死
@@ -85,21 +197,40 @@ App.DictImport = (function () {
    * 流程: 前端 base64 → Edge Function → 换百度 token → 调通用文字识别 → 返回文本
    */
   async function ocrImage(file, onProgress) {
+    var t0 = Date.now();
+    addLog('⏱', 'OCR', '开始处理图片', '文件: ' + (file.name || '(unnamed)') + ', 大小: ' + (file.size / 1024).toFixed(1) + ' KB, type: ' + file.type);
     onProgress && onProgress('准备图片...', 10);
 
-    var imgData = await fileToBase64(file, 2400);
+    addLog('🖼', 'OCR', 'fileToBase64 开始 (Canvas 压缩到 2400px)');
+    try {
+      var imgData = await fileToBase64(file, 2400);
+      addLog('✅', 'OCR', '图片已就绪 (base64)', 'base64 长度: ' + imgData.data.length + ' (' + (imgData.data.length / 1024).toFixed(1) + ' KB), mimeType: ' + imgData.mimeType);
+    } catch (e) {
+      addLog('❌', 'OCR', 'fileToBase64 失败', e.message);
+      throw e;
+    }
     onProgress && onProgress('图片已就绪, 上传到百度 OCR...', 30);
 
     var token = localStorage.getItem('beidanci_access_token') || '';
-    if (!token) throw new Error('未登录, 请先登录');
+    if (!token) {
+      addLog('❌', 'AUTH', '未登录 (localStorage 无 beidanci_access_token)');
+      throw new Error('未登录, 请先登录');
+    }
+    addLog('🔑', 'AUTH', 'Token 已从 localStorage 取出', '长度: ' + token.length + ', 前10字符: ' + token.slice(0, 10) + '...');
+
+    var url = App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL;
+    addLog('🌐', 'EDGE', '准备调 Edge Function', 'URL: ' + url);
 
     var resp;
     var lastErr = null;
+    var attempt = 0;
     // 重试 2 次 (网络抖动 / Edge Function 冷启动)
-    for (var attempt = 0; attempt < 3; attempt++) {
+    for (attempt = 0; attempt < 3; attempt++) {
+      var tFetch = Date.now();
       try {
+        addLog('📤', 'EDGE', '第 ' + (attempt + 1) + ' 次尝试 fetch', 'method: POST, body: ' + (imgData.data.length + 30) + ' bytes');
         onProgress && onProgress('上传中 (第 ' + (attempt + 1) + ' 次尝试)...', 40 + attempt * 15);
-        resp = await fetch(App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL, {
+        resp = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -107,33 +238,63 @@ App.DictImport = (function () {
           },
           body: JSON.stringify({ images: [imgData] }),
         });
+        addLog('📥', 'EDGE', 'fetch 返回', 'HTTP ' + resp.status + ' ' + resp.statusText + ', 耗时 ' + (Date.now() - tFetch) + 'ms');
         if (resp.ok) {
+          addLog('✅', 'EDGE', 'HTTP 2xx 成功');
           onProgress && onProgress('百度 OCR 识别中...', 80);
           break;
         }
         // HTTP 非 2xx, 不重试某些错误
+        var errText = '';
+        try { errText = await resp.text(); } catch (e2) { errText = '(读响应失败)'; }
+        addLog('⚠️', 'EDGE', 'HTTP 非 2xx', 'status=' + resp.status + ', body 前 500: ' + errText.slice(0, 500));
         if (resp.status === 401) throw new Error('未登录或登录已过期, 请重新登录');
         if (resp.status === 403) throw new Error('无权限, 仅管理员可使用词典导入');
-        lastErr = new Error('服务器返回 HTTP ' + resp.status);
+        // 404 表示 Edge Function 没部署
+        if (resp.status === 404) {
+          addLog('❌', 'EDGE', 'Edge Function 未部署 (HTTP 404)', '需要先在 Supabase 部署 baidu-ocr 函数');
+          throw new Error('Edge Function 未部署 (404), 请先在 Supabase 部署 baidu-ocr');
+        }
+        lastErr = new Error('服务器返回 HTTP ' + resp.status + ': ' + errText.slice(0, 200));
       } catch (e) {
+        addLog('❌', 'EDGE', 'fetch 异常', e.name + ': ' + e.message + ', 耗时 ' + (Date.now() - tFetch) + 'ms');
         lastErr = e;
         // 网络错误继续重试, 鉴权错误直接抛
-        if (e.message.indexOf('未登录') >= 0 || e.message.indexOf('无权限') >= 0) throw e;
+        if (e.message.indexOf('未登录') >= 0 || e.message.indexOf('无权限') >= 0 || e.message.indexOf('未部署') >= 0) throw e;
       }
     }
     if (!resp || !resp.ok) {
+      addLog('💀', 'OCR', '重试 3 次全失败, 抛出错误', lastErr ? lastErr.message : '未知');
       throw new Error('上传失败: ' + (lastErr ? lastErr.message : '未知错误') + ' (请检查网络)');
     }
 
     onProgress && onProgress('解析返回结果...', 95);
-    var result = await resp.json();
-    if (result.error) throw new Error('百度 OCR 错误: ' + result.error);
+    addLog('📖', 'EDGE', '读取 JSON 响应');
+    var result;
+    try {
+      result = await resp.json();
+      addLog('✅', 'EDGE', 'JSON 解析成功', 'keys: ' + Object.keys(result).join(',') + ', reqId: ' + (result.reqId || '(无)') + ', totalMs: ' + (result.totalMs ?? '(无)'));
+    } catch (e) {
+      addLog('❌', 'EDGE', 'JSON 解析失败', e.message);
+      throw new Error('服务器返回非 JSON: ' + e.message);
+    }
+
+    if (result.error) {
+      addLog('❌', 'EDGE', '服务器返回 error', result.error + (result.detail ? ' / detail: ' + result.detail : '') + (result.hint ? ' / hint: ' + result.hint : ''));
+      throw new Error('百度 OCR 错误: ' + result.error + (result.hint ? ' (' + result.hint + ')' : ''));
+    }
 
     var page = (result.pages && result.pages[0]) || { text: '' };
-    if (page.error) throw new Error(page.error);
+    if (page.error) {
+      addLog('❌', 'OCR', '该页识别失败', page.error);
+      throw new Error(page.error);
+    }
 
+    var text = page.text || '';
+    addLog('✅', 'OCR', '识别完成, 共 ' + text.length + ' 字符, ' + (text.match(/\n/g) || []).length + ' 行', '前 200 字符:\n' + text.slice(0, 200));
     onProgress && onProgress('识别完成', 100);
-    return page.text || '';
+    addLog('⏱', 'OCR', '本张耗时 ' + (Date.now() - t0) + 'ms');
+    return text;
   }
 
   /** 批次结束释放内存 (v1.16.0 改百度 OCR 后, 此函数保留为空壳, 兼容 startParse 调用) */
@@ -274,17 +435,27 @@ App.DictImport = (function () {
     document.getElementById('fileAlbum').addEventListener('change', onFileSelected);
     document.getElementById('btnReset').addEventListener('click', showUpload);
     document.getElementById('btnStartParse').addEventListener('click', startParse);
+    // 挂载调试面板 (上传页就显示, 方便看初始日志)
+    mountDebugPanel();
+    addLog('🚀', 'INIT', '词典导入模块 v' + ((window.App && window.App.VERSION) || '?') + ' 已就绪');
+    addLog('📋', 'INIT', 'EDGE_FUNCTIONS.BAIDU_OCR_URL', App.Config && App.Config.EDGE_FUNCTIONS && App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL);
+    addLog('📋', 'INIT', 'localStorage token 状态', (localStorage.getItem('beidanci_access_token') ? '已存在 (长度 ' + localStorage.getItem('beidanci_access_token').length + ')' : '❌不存在'));
   }
 
   var selectedFiles = [];
 
   function onFileSelected(e) {
     var files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
+    if (files.length === 0) {
+      addLog('⚠️', 'UPLOAD', '文件选择为空');
+      return;
+    }
+    addLog('📁', 'UPLOAD', '选中 ' + files.length + ' 个文件', files.map(function (f) { return f.name + '(' + (f.size / 1024).toFixed(1) + 'KB,' + f.type + ')'; }).join(', '));
 
     // 最多 10 张
     selectedFiles = files.slice(0, MAX_PAGES);
     if (files.length > MAX_PAGES) {
+      addLog('✂️', 'UPLOAD', '超过 ' + MAX_PAGES + ' 张, 截取前 ' + MAX_PAGES + ' 张');
       App.showToast('已自动截取前 ' + MAX_PAGES + ' 张, 多余的被忽略', 'info');
     }
 
@@ -317,20 +488,31 @@ App.DictImport = (function () {
 
   // ========== Step 2: OCR + 解析 ==========
   async function startParse() {
+    addLog('🎬', 'PARSE', 'startParse 被触发, 共 ' + selectedFiles.length + ' 张图');
     var container = document.getElementById('dictImportContainer');
     container.innerHTML = (
-      '<div style="text-align:center;padding:40px 20px;">' +
+      '<div style="text-align:center;padding:30px 20px 10px;">' +
         '<div style="font-size:16px;font-weight:600;margin-bottom:12px;">正在识别词典页面...</div>' +
         '<div id="parseProgress" style="color:var(--color-text-light);font-size:13px;">准备中...</div>' +
         '<div id="parseBar" style="width:100%;max-width:400px;height:6px;background:var(--color-border);border-radius:3px;margin:16px auto 0;overflow:hidden;">' +
           '<div id="parseBarFill" style="height:100%;background:var(--color-primary);border-radius:3px;width:0%;transition:width 0.3s;"></div>' +
         '</div>' +
-      '</div>'
+      '</div>' +
+      renderDebugPanel()
     );
+    // 重新挂载调试面板 (上面的 innerHTML 替换掉了, 需要重新拿到 element)
+    debugPanelEl = document.getElementById('debugLogPre');
+    bindDebugButtons();
+    if (debugPanelEl) {
+      debugPanelEl.textContent = debugLogs.join('\n') + '\n\n(实时日志, 滑到底部查看最新)';
+      debugPanelEl.scrollTop = debugPanelEl.scrollHeight;
+    }
 
     try {
       // 创建批次
+      addLog('💾', 'DB', '创建导入批次 dictCreateImport(camera)');
       var importRec = await App.DB.dictCreateImport('camera');
+      addLog('✅', 'DB', '批次创建成功', 'import_id: ' + (importRec && importRec.id));
 
       var pages = [];
       var allEntries = [];
@@ -341,6 +523,7 @@ App.DictImport = (function () {
 
       for (var i = 0; i < selectedFiles.length; i++) {
         var file = selectedFiles[i];
+        addLog('📄', 'PARSE', '===== 开始第 ' + (i + 1) + ' / ' + selectedFiles.length + ' 张 =====');
         var progress = document.getElementById('parseProgress');
         var barFill = document.getElementById('parseBarFill');
         progress.textContent = '准备识别第 ' + (i + 1) + ' / ' + selectedFiles.length + ' 张...';
@@ -363,12 +546,15 @@ App.DictImport = (function () {
         var ocrDur = Date.now() - ocrStart;
 
         // 解析
+        addLog('🔍', 'PARSE', '开始解析第 ' + (i + 1) + ' 张 (parseDictionaryPage)');
         var parsed = parseDictionaryPage(ocrText);
+        addLog('✅', 'PARSE', '解析完成 第 ' + (i + 1) + ' 张', 'words: ' + parsed.words.length + ', phrases: ' + parsed.phrases.length + ', pageNumber: ' + parsed.pageNumber);
         totalWords += parsed.words.length;
         totalPhrases += parsed.phrases.length;
         pageNumbers.push(parsed.pageNumber);
 
         // 创建 page 行
+        addLog('💾', 'DB', '保存 page 行到 dictionary_pages', 'page_number: ' + (parsed.pageNumber || (i + 1)) + ', first_headword: ' + (parsed.words[0] ? parsed.words[0].word : '(无)'));
         var pageRow = await App.DB.dictAddPages(importRec.id, [{
           page_number: parsed.pageNumber || (i + 1),
           ocr_raw_text: ocrText,
@@ -377,6 +563,7 @@ App.DictImport = (function () {
           parse_duration_ms: ocrDur,
         }]);
         var pageId = pageRow[0] ? pageRow[0].id : (pageRow.id || null);
+        addLog('✅', 'DB', 'page 保存成功', 'page_id: ' + pageId);
         pages.push({ number: parsed.pageNumber, entries: parsed.words.length + parsed.phrases.length });
 
         // 收集 entries
@@ -410,15 +597,19 @@ App.DictImport = (function () {
             row_order: parsed.words.length * 2 + pi * 2 + 1,
           });
         });
+        addLog('✅', 'PARSE', '===== 第 ' + (i + 1) + ' 张处理完成, 累计 entries: ' + allEntries.length + ' =====');
       }
 
       // 写入 entries (分批)
+      addLog('💾', 'DB', '写入 entries 到 dictionary_entries, 总计 ' + allEntries.length + ' 条 (分批 50/批)');
       if (allEntries.length > 0) {
         var BATCH = 50;
         for (var bi = 0; bi < allEntries.length; bi += BATCH) {
           await App.DB.dictAddEntries(importRec.id, allEntries.slice(bi, bi + BATCH));
+          addLog('  ', 'DB', '批次 ' + (Math.floor(bi / BATCH) + 1) + ' 写入 ' + Math.min(BATCH, allEntries.length - bi) + ' 条');
         }
       }
+      addLog('✅', 'DB', '全部 entries 写入完成');
 
       // 排序页码 + 完成批次
       pageNumbers.sort(function (a, b) { return a - b; });
@@ -429,12 +620,16 @@ App.DictImport = (function () {
         phrases: totalPhrases,
         page_numbers: pageNumbers,
       };
+      addLog('💾', 'DB', '完成批次 dictFinalizeImport', 'totalWords: ' + totalWords + ', totalPhrases: ' + totalPhrases);
       await App.DB.dictFinalizeImport(importRec.id, totalWords, totalPhrases, pageNumbers, summary);
+      addLog('✅', 'DB', '批次完成');
 
       progress.textContent = '完成!';
       if (barFill) barFill.style.width = '100%';
+      addLog('🎉', 'PARSE', '全部完成! 总耗时 ' + (Date.now() - startTime) + 'ms, ' + totalWords + ' 词, ' + totalPhrases + ' 词组');
 
       // 跳过审核直接进入总结页 (v1.12: 自动 accepted, 审核环节可在历史批次中手动调整)
+      addLog('📝', 'PARSE', '自动 mark 所有 entries 为 accepted');
       await App.DB.api('PATCH', 'dictionary_entries',
         { review_status: 'accepted' },
         'import_id=eq.' + encodeURIComponent(importRec.id));
@@ -442,9 +637,10 @@ App.DictImport = (function () {
       showSummary(importRec.id, summary);
 
     } catch (e) {
+      addLog('💀', 'PARSE', '识别失败, 进入 catch', e.name + ': ' + e.message + '\nstack: ' + (e.stack || '(无)').slice(0, 500));
       console.error('[DictImport] 解析失败', e);
       container.innerHTML = (
-        '<div style="text-align:center;padding:40px 20px;">' +
+        '<div style="text-align:center;padding:30px 20px 10px;">' +
           '<div style="font-size:16px;font-weight:600;margin-bottom:12px;color:var(--color-danger);">识别失败</div>' +
           '<div style="color:var(--color-text-light);font-size:13px;margin-bottom:20px;line-height:1.6;">' + App.Utils.escapeHtml(e.message) + '</div>' +
           '<div style="color:var(--color-muted);font-size:12px;margin-bottom:16px;">' +
@@ -453,8 +649,16 @@ App.DictImport = (function () {
               : '提示: 请确认词典图片清晰且光线充足') +
           '</div>' +
           '<button class="btn btn-primary" onclick="App.DictImport.retry()">重试</button>' +
-        '</div>'
+        '</div>' +
+        renderDebugPanel()
       );
+      // 失败后也挂上调试面板, 用户可以复制日志
+      debugPanelEl = document.getElementById('debugLogPre');
+      bindDebugButtons();
+      if (debugPanelEl) {
+        debugPanelEl.textContent = debugLogs.join('\n') + '\n\n(实时日志, 滑到底部查看最新)';
+        debugPanelEl.scrollTop = debugPanelEl.scrollHeight;
+      }
       window._dictRetry = showUpload;
       App.showToast('识别失败: ' + e.message, 'error', 5000);
     } finally {
