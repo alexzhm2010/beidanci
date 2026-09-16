@@ -52,12 +52,57 @@ App.DictImport = (function () {
   var coreAsmUrl = getOcrAssetUrl('tesseract-core.asm.js');
 
   /** 探测 tessdata 最佳来源 */
+  /** IndexedDB 缓存 — 持久化大体积 OCR 资源, 下次零下载
+   *  存 eng.traineddata.gz 和 tesseract-core.asm.js
+   *  用 'beidanci-ocr-cache' db, 'resources' store
+   */
+  var IDB_NAME = 'beidanci-ocr-cache';
+  var IDB_STORE = 'resources';
+
+  function openIDB() {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function(e) {
+        e.target.result.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = function(e) { resolve(e.target.result); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  }
+
+  async function idbGet(key) {
+    try {
+      var db = await openIDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readonly');
+        var r = tx.objectStore(IDB_STORE).get(key);
+        r.onsuccess = function() { resolve(r.result || null); };
+        r.onerror = function() { resolve(null); };
+      });
+    } catch (e) { return null; }
+  }
+
+  async function idbPut(key, value) {
+    try {
+      var db = await openIDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = function() { resolve(); };
+        tx.onerror = function() { /* ignore */ };
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  /** tessdata 源列表 — 排 jsdelivr 第一, 有国内节点 1s 下完 11MB
+   *  GitHub Pages 同源放在最后 (国内 CDN 极慢, 30s+ 还超时)
+   */
   async function getTessdataUrl(onProgress) {
     if (tessdataUrlCache) return tessdataUrlCache;
     var candidates = [
-      { url: './tessdata', desc: '本地' },
-      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'jsdelivr CDN' },
-      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方 projectnaptha' }
+      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'jsdelivr CDN (国内最快, 1s)', trusted: true },
+      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方 projectnaptha', trusted: true },
+      { url: getOcrAssetUrl('tessdata'), desc: '本地同源 (GitHub Pages 国内慢)', trusted: true },
     ];
     for (var i = 0; i < candidates.length; i++) {
       try {
@@ -66,6 +111,7 @@ App.DictImport = (function () {
       } catch (e) { /* 继续试下一个 */ }
     }
     if (!tessdataUrlCache) throw new Error('所有 tessdata 源均不可达');
+    console.log('[DictImport] tessdata 源:', tessdataUrlCache);
     return tessdataUrlCache;
   }
 
@@ -171,17 +217,34 @@ App.DictImport = (function () {
     }
     if (!window.pako) throw new Error('pako 加载失败');
 
-    // 2. 加载 tesseract-core.asm.js (5.4MB — 用 fetch + Blob + 真实进度 + 180s 超时)
-    onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB, 手机慢网可能需要 30-120s)...', 10);
+    // 2. 加载 tesseract-core.asm.js (5.4MB — 先查 IndexedDB 缓存, 没有再 fetch)
     var t0 = Date.now();
     var coreBytes;
-    try {
-      coreBytes = await fetchWithProgress(coreAsmUrl, 'core asm.js', onProgress, 180000);
-    } catch (e) {
-      throw new Error('tesseract-core.asm.js 下载失败: ' + e.message +
-        ' (耗时 ' + Math.round((Date.now()-t0)/1000) + 's, 建议在 WiFi 下重试)');
+    var coreCacheKey = 'tesseract-core.asm.js@4.0.1';
+    var cached = await idbGet(coreCacheKey);
+    if (cached && cached instanceof Uint8Array && cached.length > 1000000) {
+      coreBytes = cached;
+      console.log('[DictImport] core asm.js 命中 IndexedDB 缓存:', coreBytes.length, 'bytes');
+      onProgress && onProgress('core asm.js 从本地缓存加载 ✓', 15);
+    } else {
+      // 同源优先, 失败 fallback jsdelivr
+      var coreSrcList = [
+        { url: getOcrAssetUrl('tesseract-core.asm.js'), desc: '同源' },
+        { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js', desc: 'jsdelivr CDN' }
+      ];
+      onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB)...', 10);
+      var coreErr = null;
+      for (var ci = 0; ci < coreSrcList.length; ci++) {
+        try {
+          coreBytes = await fetchWithProgress(coreSrcList[ci].url, 'core asm.js (' + coreSrcList[ci].desc + ')', onProgress, 180000);
+          console.log('[DictImport] core asm.js 下载完成 (' + coreSrcList[ci].desc + '):', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
+          await idbPut(coreCacheKey, coreBytes); // 存缓存
+          coreErr = null;
+          break;
+        } catch (e) { coreErr = e; }
+      }
+      if (coreErr) throw new Error('tesseract-core.asm.js 下载失败: ' + coreErr.message);
     }
-    console.log('[DictImport] core asm.js 下载完成:', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
 
     // Blob URL 注入 script —— tesseract-core.asm.js 是 IIFE, 执行完 Module 就 fully initialized
     var blob = new Blob([coreBytes], { type: 'text/javascript' });
@@ -214,14 +277,21 @@ App.DictImport = (function () {
       throw new Error('FS_createDataFile 不可用 (Module keys: ' + Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 }).join(',') + ')');
     }
 
-    // 5. 下载 tessdata (同源 public/tessdata/eng.traineddata.gz, ~11MB gzip)
-    onProgress && onProgress('下载 tessdata (11MB)...', 70);
+    // 5. 下载 tessdata — 先查 IndexedDB, 没有用 getTessdataUrl() 选最快的 CDN (jsdelivr 优先)
     var tdBytes;
-    try {
-      var tdUrl = getOcrAssetUrl('tessdata/eng.traineddata.gz');
+    var tdCacheKey = 'eng.traineddata.gz@4.0.0';
+    var tdCached = await idbGet(tdCacheKey);
+    if (tdCached && tdCached instanceof Uint8Array && tdCached.length > 1000000) {
+      tdBytes = tdCached;
+      console.log('[DictImport] tessdata 命中 IndexedDB 缓存:', tdBytes.length, 'bytes');
+      onProgress && onProgress('tessdata 从本地缓存加载 ✓', 85);
+    } else {
+      onProgress && onProgress('下载 tessdata (11MB)...', 70);
+      var tdBase = await getTessdataUrl();
+      var tdUrl = tdBase + '/eng.traineddata.gz';
+      console.log('[DictImport] tessdata 下载地址:', tdUrl);
       tdBytes = await fetchWithProgress(tdUrl, 'tessdata', onProgress, 180000);
-    } catch (e) {
-      throw new Error('tessdata 下载失败: ' + e.message);
+      await idbPut(tdCacheKey, tdBytes);
     }
     onProgress && onProgress('解压 tessdata...', 95);
     var tdData = pako.ungzip(new Uint8Array(tdBytes));
@@ -372,7 +442,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.6';
+    var EXPECTED_VER = '1.13.7';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
