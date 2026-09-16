@@ -65,7 +65,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.15.3',
+  APP_VERSION: '1.16.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -109,6 +109,8 @@ App.Config = {
     MIGRATE_USER_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/migrate-user',
     // 改密/找回密码 (同步更新 Supabase Auth bcrypt + user_auth 哈希)
     UPDATE_PASSWORD_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/update-password',
+    // 词典导入 v1.16.0: 百度 OCR 云端识别 (API Key/Secret Key 配在 Supabase Secrets)
+    BAIDU_OCR_URL: 'https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/baidu-ocr',
   },
 
   // 密保问题选项

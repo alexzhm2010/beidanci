@@ -1,42 +1,34 @@
 /**
- * 词典导入模块 (v1.15.2) — OCR 引擎彻底重写
- * Admin 专属功能: 从词典拍照 → OCR → 结构化解析 → 审核 → 发布
+ * 词典导入模块 (v1.16.0) — 改用百度 OCR 云端识别
+ * Admin 专属功能: 从词典拍照 → 百度 OCR → 结构化解析 → 审核 → 发布
  *
- * v1.13.0 根因修复:
- *   HarmonyOS NEXT / ArkWeb 浏览器的 Web Worker + WASM 有坑
- *   tesseract.js v4/v5 的 createWorker() 内部硬编码走 Worker, 双版本全超时
- *   → 彻底放弃 tesseract.js 框架, 直接用 tesseract-core.asm.js (5.6MB 纯 JS)
- *     + pako 解压 tessdata, 完全在主线程跑, 零 Worker/WASM 依赖
+ * v1.13.x → v1.15.x 历程 (本地 Tesseract 路线, 最终放弃):
+ *   v1.13.0: 改用 tesseract-core.asm.js + pako + tessdata, 主线程跑
+ *   v1.15.1: 下载提速 (Promise.all + 预分配 Uint8Array)
+ *   v1.15.2: 真 race 多 CDN + 跳过 pako 解压 + 速度诊断
+ *   v1.15.3: AbortController 取消慢源, 修卡死根因
+ *   问题: ArkWeb 上 Worker/WASM 死路一条, 5.4MB+11MB 下载体验差,
+ *         LSTM 初始化仍卡死, 已穷尽本地优化
  *
- * v1.15.1 下载提速:
- *   1. tessdata HEAD 探测改 Promise.all 并行 (省 1-3s)
- *   2. fetchWithProgress 预分配大 Uint8Array 流式写入 (省最后 N 次拷贝合并)
- *   3. 删除 GitHub Pages 同源 fallback (国内无 CDN, 几十 KB/s 是灾难)
- *   4. idbPut 加 await, 保证缓存写入完整 (否则用户关页面下次重下)
+ * v1.16.0 改用百度 OCR (云端正解):
+ *   流程: 前端拍照 → 上传 base64 → Supabase Edge Function → 百度通用文字识别 → 返回文本
+ *   优势:
+ *   1. 前端零本地依赖 (删 5.4MB asm.js + 11MB tessdata + 46KB pako)
+ *   2. ArkWeb 兼容性问题彻底消失 (无 Worker/WASM/大文件下载)
+ *   3. 国内访问无障碍 (vs Gemini 被墙), 百度 OCR 精度比 Tesseract 好
+ *   4. 前端代码量从 1490 行降到 ~940 行 (删 720 行 Tesseract 代码)
  *
- * v1.15.2 tessdata 下载提速 (根因修复):
- *   问题: v1.15.1 的 "race" 注释写错, 实际是 Promise.all 等所有源 HEAD 完成,
- *         projectnaptha.com 实测 17KB/s, HEAD 卡 5s 超时拖慢整体
- *   修复:
- *   1. 删 HEAD 探测, 改 raceDownload 真 race 并行下载 (谁先下完用谁)
- *   2. 多 CDN 源: jsdelivr + unpkg + fastly, 谁快用谁
- *   3. 改用未压缩 tessdata_best, 跳过 pako 解压 (省 1-2s + 省内存)
- *   4. fetchWithProgress 加速度诊断日志 (每秒 MB/s), 帮用户判断瓶颈
+ * 安全:
+ *   - API Key / Secret Key 配在 Supabase Secrets, 不进 git 仓库
+ *   - Edge Function 用 Deno.env.get() 读取, 不硬编码
+ *   - 鉴权: 必须管理员登录 (检查 user_auth.is_admin)
  *
- * v1.15.3 卡死根因修复:
- *   问题: v1.15.2 race 胜出后只 finished=true, 其他慢源还死循环 reader.read()
- *         占主线程, 用户看到 "下载完成 100%" 但浏览器卡死不动
- *   修复:
- *   1. raceDownload 胜出后立即 AbortController.abort() 取消其他慢源
- *      fetchWithProgress 透传 signal, signal abort 时 reader.cancel()
- *   2. MEMFS 写入加进度提示 (15MB 同步拷贝 1-3s)
- *   3. TessBaseAPI.Init 加进度提示 + setTimeout 让 UI 刷新
- *      (LSTM 加载 5-20s 主线程阻塞, 不能用 timeout 保护)
+ * 配额: 通用文字识别标准版 1000 次/月 (适合词典英文)
  *
  * 流程:
  *   1. 上传 (拍照/相册, 最多10张)
- *   2. OCR (tesseract-core.asm.js 直接调 TessBaseAPI, 主线程跑)
- *   3. 解析 (按词典排版规则切分 headword/义项/派生词/词组)
+ *   2. OCR (前端 base64 → Edge Function → 百度 → 返回文本)
+ *   3. 解析 (按词典排版规则切分 headword/义项/派生词/词组, 复用 v1.13.x 逻辑)
  *   4. 保存批次到 dictionary_imports + dictionary_pages + dictionary_entries
  *   5. 审核 (admin 逐条确认/拒绝)
  *   6. 发布 (accepted 词条写入 words 表)
@@ -46,498 +38,110 @@ App.DictImport = (function () {
 
   var MAX_PAGES = 10;
 
-  // ========== OCR 引擎: 直接 tesseract-core.asm.js 主线程跑 ==========
-  // 根因: HarmonyOS NEXT / ArkWeb 的 Web Worker + WASM 有坑
-  //       tesseract.js v4/v5 createWorker 内部硬编码用 Worker, 全挂
-  //       ArkWeb 对跨域 fetch 大文件 (5.6MB) 不稳定, 随机 Failed to fetch
-  // 方案: 跳过 tesseract.js 框架, 直接调 tesseract-core.asm.js (纯 JS)
-  //       + pako 解压 tessdata, 完全不碰 WASM 和 Worker
-  //       + 所有 OCR 资源打包到 public/ 目录, 同源加载, 零 CORS 零 fetch 限制
-  var ocrModule = null;   // { api, Module } 初始化成功后存 TessBaseAPI 实例
-  var ocrInitError = null;
-  var tessdataUrlCache = null;
+  // ========== OCR 引擎: v1.16.0 改用百度 OCR (Edge Function) ==========
+  //   v1.13.x 问题: Tesseract.js 在 ArkWeb 上 Worker/WASM 有坑, 5.4MB 下载慢,
+  //                 LSTM 初始化卡死, 11MB tessdata race 后还卡死
+  //   v1.16.0 方案: 前端只负责拍照 + 上传 base64 → Edge Function → 百度 OCR → 文本
+  //                 前端零大文件, 零本地 OCR 依赖, ArkWeb 兼容性问题彻底消失
+  //                 百度 OCR 国内访问无障碍, 精度比 Tesseract 好
 
-  /** 从当前 location 推算同源资源的正确 base path
-   *  适配场景: dev server / GitHub Pages 子路径 / 任意静态托管
-   *  例: https://alexzhm2010.github.io/beidanci/ + pako.min.js → '/beidanci/pako.min.js'
-   *      http://localhost:5174/ + pako.min.js → '/pako.min.js'
+  /**
+   * File → base64 (不带 data:image/xxx;base64, 前缀, 百度接口要裸 base64)
+   * 同时做图片压缩 (Canvas + 等比缩放到 maxEdge), 减小传输体积
    */
-  function getOcrAssetUrl(assetName) {
-    var path = location.pathname;
-    if (!path.endsWith('/')) {
-      var lastSlash = path.lastIndexOf('/');
-      path = path.substring(0, lastSlash + 1);
-    }
-    return path + assetName;
-  }
-
-  // 同源静态资源 — 已打包进 public/, 极速 + 零 CORS 问题
-  // 动态适配部署 base path
-  var pakoUrl = getOcrAssetUrl('pako.min.js');
-  var coreAsmUrl = getOcrAssetUrl('tesseract-core.asm.js');
-
-  /** 探测 tessdata 最佳来源 */
-  /** IndexedDB 缓存 — 持久化大体积 OCR 资源, 下次零下载
-   *  存 eng.traineddata.gz 和 tesseract-core.asm.js
-   *  用 'beidanci-ocr-cache' db, 'resources' store
-   */
-  var IDB_NAME = 'beidanci-ocr-cache';
-  var IDB_STORE = 'resources';
-
-  function openIDB() {
-    return new Promise(function(resolve, reject) {
-      var req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = function(e) {
-        e.target.result.createObjectStore(IDB_STORE);
-      };
-      req.onsuccess = function(e) { resolve(e.target.result); };
-      req.onerror = function(e) { reject(e.target.error); };
-    });
-  }
-
-  async function idbGet(key) {
-    try {
-      var db = await openIDB();
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(IDB_STORE, 'readonly');
-        var r = tx.objectStore(IDB_STORE).get(key);
-        r.onsuccess = function() { resolve(r.result || null); };
-        r.onerror = function() { resolve(null); };
-      });
-    } catch (e) { return null; }
-  }
-
-  async function idbPut(key, value) {
-    try {
-      var db = await openIDB();
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).put(value, key);
-        tx.oncomplete = function() { resolve(); };
-        tx.onerror = function() { /* ignore */ };
-      });
-    } catch (e) { /* ignore */ }
-  }
-
-  /** tessdata 源列表 — v1.15.2 改用未压缩版, 跳过 pako 解压步骤
-   *  v1.15.1 问题: HEAD 探测用 Promise.all 等所有源完成 (注释写 race 实际是 all),
-   *                projectnaptha.com 实测 17KB/s, HEAD 会卡 5s 超时, 拖慢整体
-   *  v1.15.2 方案: 删 HEAD 探测, 改真 race 并行下载 (谁先下完用谁, 慢源完全不阻塞)
-   *                多 CDN 源: jsdelivr + unpkg + fastly, 谁快用谁
-   *                改用未压缩 eng.traineddata, 跳过 pako 解压 (省 1-2s + 省内存)
-   */
-  var TESSDATA_SOURCES = [
-    { url: 'https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best/eng.traineddata', desc: 'jsdelivr (tessdata_best 未压缩)' },
-    { url: 'https://unpkg.com/tesseract-ocr-tessdata-best@4.0.0/eng.traineddata', desc: 'unpkg (tessdata_best)' },
-    { url: 'https://fastly.jsdelivr.net/gh/tesseract-ocr/tessdata_best/eng.traineddata', desc: 'fastly jsdelivr' },
-  ];
-
-  /** 真 race 并行下载: 同时从所有源开始下, 谁先完成用谁, 其他立即 AbortController 取消
-   *  v1.15.3 修复: v1.15.2 胜出后只 finished=true, 其他源还死循环 reader.read() 占主线程
-   *                → 卡死在 "下载完成 100%" 之后
-   *                改用 AbortController, 胜出后立即 abort 其他慢源的 fetch + reader
-   */
-  async function raceDownload(sources, label, onProgress, timeoutMs) {
-    if (sources.length === 0) throw new Error(label + ' 无可用源');
+  function fileToBase64(file, maxEdge) {
+    maxEdge = maxEdge || 2400;
     return new Promise(function (resolve, reject) {
-      var finished = false;
-      var errors = [];
-      var remaining = sources.length;
-      // 每个源配一个 AbortController, 胜出后立即 abort 其他
-      var controllers = sources.map(function () {
-        return (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      });
-      var progressBase = { jsdelivr: 0, unpkg: 0, fastly: 0 };
-      function reportProgress() {
-        var maxPct = 0;
-        for (var k in progressBase) { if (progressBase[k] > maxPct) maxPct = progressBase[k]; }
-        if (onProgress) onProgress(label + ' 下载中 (race, 最快源 ' + maxPct + '%)...', maxPct);
-      }
-      function abortAllOthers(exceptIdx) {
-        for (var i = 0; i < controllers.length; i++) {
-          if (i !== exceptIdx && controllers[i]) {
-            try { controllers[i].abort(); } catch (e) { /* ignore */ }
-          }
-        }
-      }
-      sources.forEach(function (src, idx) {
-        var srcKey = src.desc.split(' ')[0];
-        var wrappedProgress = function (msg, pct) {
-          if (!finished) {
-            progressBase[srcKey] = pct;
-            reportProgress();
-          }
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('图片读取失败')); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('图片解码失败')); };
+        img.onload = function () {
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = Math.min(1, maxEdge / Math.max(w, h));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale);
+          canvas.height = Math.round(h * scale);
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          // 转 JPEG 体积小 (百度 OCR 接受 jpeg/png/bmp), 质量 0.85
+          var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          // 去掉 "data:image/jpeg;base64," 前缀
+          var base64 = dataUrl.split(',')[1];
+          resolve({ data: base64, mimeType: 'image/jpeg' });
         };
-        var signal = controllers[idx] ? controllers[idx].signal : undefined;
-        fetchWithProgress(src.url, label + ' (' + src.desc + ')', wrappedProgress, timeoutMs, signal)
-          .then(function (bytes) {
-            if (finished) return;
-            finished = true;
-            // 立即取消所有其他慢源, 释放它们的网络/主线程占用
-            abortAllOthers(idx);
-            console.log('[DictImport] ✅ ' + label + ' race 胜出: ' + src.desc + ', ' + bytes.length + ' bytes (已 abort 其他 ' + (sources.length - 1) + ' 个慢源)');
-            onProgress && onProgress(label + ' 下载完成 (' + src.desc + ')', 100);
-            resolve(bytes);
-          })
-          .catch(function (e) {
-            if (finished) return;
-            // 被 abort 的不算失败 (是其他源胜出主动取消的)
-            if (e && e.name === 'AbortError') {
-              remaining--;
-              if (remaining === 0) {
-                // 理论上不会到这里, 因为胜出的源已 resolve
-              }
-              return;
-            }
-            console.warn('[DictImport] ❌ ' + label + ' 源失败 (' + src.desc + '):', e.message);
-            errors.push(src.desc + ': ' + e.message);
-            remaining--;
-            if (remaining === 0) {
-              reject(new Error(label + ' 所有源均失败: ' + errors.join(' | ')));
-            }
-          });
-      });
-    });
-  }
-
-  async function getTessdataUrl() {
-    // v1.15.2: 保留兼容签名, 但实际下载走 raceDownload
-    return TESSDATA_SOURCES[0].url;
-  }
-
-  /** 加载脚本 —— 同源用 script 标签, 跨域 fallback fetch+Blob URL
-   *  同源资源 (public/ 目录下) 没有 CORS/nosniff 问题, 直接 <script src> 最快
-   *  跨域资源 fallback 到 fetch+Blob URL 绕过 ArkWeb 严格校验
-   */
-  function loadScript(url) {
-    var isSameOrigin = /^\/[^/]/.test(url) || url.indexOf(location.origin) === 0;
-    return new Promise(function (resolve, reject) {
-      var script = document.createElement('script');
-      script.src = url;
-      script.onload = resolve;
-      script.onerror = function () {
-        if (isSameOrigin) {
-          // 同源理论上不应该失败
-          reject(new Error('同源脚本加载失败: ' + url));
-        } else {
-          // 跨域 fallback: fetch → Blob URL (绕过 nosniff/CORS 限制)
-          fetch(url, { credentials: 'omit' }).then(function (resp) {
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            return resp.blob();
-          }).then(function (blob) {
-            var blobUrl = URL.createObjectURL(blob);
-            var s2 = document.createElement('script');
-            s2.src = blobUrl;
-            s2.onload = function () {
-              setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
-              resolve();
-            };
-            s2.onerror = function () {
-              URL.revokeObjectURL(blobUrl);
-              reject(new Error('Blob URL 也失败: ' + url));
-            };
-            document.head.appendChild(s2);
-          }).catch(function (e) {
-            reject(new Error('脚本加载失败 (script + fetch 双方案): ' + url + ' — ' + e.message));
-          });
-        }
+        img.src = reader.result;
       };
-      document.head.appendChild(script);
+      reader.readAsDataURL(file);
     });
   }
 
-  function withTimeout(promise, ms, label) {
-    return new Promise(function (resolve, reject) {
-      var timer = setTimeout(function () { reject(new Error(label + ' 超时 (' + ms + 'ms)')); }, ms);
-      promise.then(
-        function (v) { clearTimeout(timer); resolve(v); },
-        function (e) { clearTimeout(timer); reject(e); }
-      );
-    });
-  }
-
-  /** 直接初始化 tesseract-core.asm.js + tessdata
-   *  完全不碰 Worker/WASM, 主线程调 Emscripten API
+  /**
+   * 调用百度 OCR Edge Function (单张图片)
+   * Edge Function 在 supabase/functions/baidu-ocr/index.ts
+   * 流程: 前端 base64 → Edge Function → 换百度 token → 调通用文字识别 → 返回文本
    */
-  /** fetch 下载 — ReadableStream 分块读取 (ArkWeb 上 arrayBuffer() 对大文件有坑)
-   *  v1.13.10 验证: ReadableStream 能正常下到 100%, arrayBuffer() 会卡住
-   *  v1.15.1 优化: 预分配大 Uint8Array + 流式 set, 避免最后 N 次拷贝合并
-   *                (5.4MB 文件 chunk=16KB 时省 340 次 push + 1 次 5.4MB 大拷贝)
-   */
-  async function fetchWithProgress(url, label, onProgress, timeoutMs, signal) {
-    timeoutMs = timeoutMs || 180000;
-    // v1.15.3: 透传 AbortController.signal, raceDownload 胜出后可立即取消慢源
-    var fetchOpts = signal ? { signal: signal } : {};
-    var resp = await withTimeout(fetch(url, fetchOpts), timeoutMs, label + ' (fetch)');
-    if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
-    var total = parseInt(resp.headers.get('content-length'), 10) || 0;
-    var reader = resp.body.getReader();
-    // v1.15.3: signal abort 时主动 cancel reader, 否则 reader.read() 会卡到 chunk 超时
-    if (signal) {
-      signal.addEventListener('abort', function () {
-        try { reader.cancel(); } catch (e) { /* ignore */ }
-      });
-    }
-    // 预分配缓冲区: 知道 total 就精确分配, 不知道就先 16MB 动态扩
-    var buf = total > 0 ? new Uint8Array(total) : new Uint8Array(16 * 1024 * 1024);
-    var received = 0;
-    var lastProgressTs = 0;
-    var speedStartTs = Date.now();   // v1.15.2: 速度诊断起点
-    var speedLastTs = speedStartTs;
-    var speedLastBytes = 0;
-    while (true) {
-      var chunk = await withTimeout(reader.read(), 30000, label + ' (read chunk)');
-      if (chunk.done) break;
-      var need = received + chunk.value.length;
-      if (need > buf.length) {
-        // 动态扩容 (total 未知时): 翻倍 + 拷贝
-        var newBuf = new Uint8Array(Math.max(need, buf.length * 2));
-        newBuf.set(buf.subarray(0, received));
-        buf = newBuf;
-      }
-      buf.set(chunk.value, received);
-      received += chunk.value.length;
-      var now = Date.now();
-      // v1.15.2: 每 1s 打印一次下载速度诊断, 帮用户判断 CDN 慢还是 ArkWeb 慢
-      if (now - speedLastTs > 1000) {
-        var dt = (now - speedLastTs) / 1000;
-        var dBytes = received - speedLastBytes;
-        var speedMBs = (dBytes / dt / 1024 / 1024).toFixed(2);
-        var totalMB = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
-        var recvMB = (received / 1024 / 1024).toFixed(1);
-        console.log('[DictImport] ' + label + ' 速度诊断: ' + recvMB + '/' + totalMB + 'MB, ' + speedMBs + ' MB/s');
-        speedLastTs = now;
-        speedLastBytes = received;
-      }
-      // 进度回调节流 (50ms 一次, 避免主线程被刷爆)
-      if (onProgress && now - lastProgressTs > 50) {
-        lastProgressTs = now;
-        var pct = total > 0 ? Math.round((received / total) * 100) : 50;
-        onProgress(label + ' 下载中...', pct);
-      }
-    }
-    // 截断到实际长度 (total 未知时 buf 可能比 received 大)
-    var result = received === buf.length ? buf : buf.subarray(0, received);
-    onProgress && onProgress(label + ' 下载完成', 100);
-    // v1.15.2: 完成时打印平均速度
-    var totalTime = (Date.now() - speedStartTs) / 1000;
-    var avgSpeedMBs = (received / totalTime / 1024 / 1024).toFixed(2);
-    console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes, 平均 ' + avgSpeedMBs + ' MB/s, 耗时 ' + totalTime.toFixed(1) + 's');
-    return result;
-  }
-
-  async function initDirectOcr(onProgress) {
-    if (ocrModule) return ocrModule;
-
-    // v1.15.2: pako 不再必需 (改用未压缩 tessdata_best), 跳过加载省 46KB
-    // 保留 pakoUrl 变量以兼容诊断函数, 但 initDirectOcr 不再加载 pako
-
-    // 先查 IndexedDB 缓存, 命中就 0 下载, 没有再走 jsdelivr CDN
-    // v1.15.1: 删除同源 fallback — GitHub Pages 国内无 CDN, 几十 KB/s 是灾难
-    //          idbPut 改 await, 保证缓存写入完整 (否则用户关页面下次重下)
-    var t0 = Date.now();
-    var coreBytes;
-    var coreCacheKey = 'tesseract-core.asm.js@4.0.1';
-    var cached = await idbGet(coreCacheKey);
-    if (cached && cached instanceof Uint8Array && cached.length > 1000000) {
-      coreBytes = cached;
-      console.log('[DictImport] core asm.js 命中 IndexedDB 缓存:', coreBytes.length, 'bytes');
-      onProgress && onProgress('core asm.js 从本地缓存加载 ✓', 15);
-    } else {
-      // jsdelivr CDN 国内节点实测 1s 下完 5.4MB, 唯一可靠源
-      var coreUrl = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js';
-      onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB, jsdelivr CDN)...', 10);
-      try {
-        coreBytes = await fetchWithProgress(coreUrl, 'core asm.js', onProgress, 180000);
-        console.log('[DictImport] ✅ core asm.js 下载完成:', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
-        // await 保证写入完整, 否则用户中途关页面下次还得重下
-        try {
-          await idbPut(coreCacheKey, coreBytes);
-          console.log('[DictImport] core asm.js 已存入 IndexedDB 缓存');
-        } catch (e) {
-          console.warn('[DictImport] core asm.js IDB 缓存失败 (不影响本次):', e.message);
-        }
-      } catch (e) {
-        throw new Error('tesseract-core.asm.js 下载失败: ' + e.message + ' (jsdelivr CDN 不可达, 请检查网络或切换 WiFi)');
-      }
-    }
-
-    // Blob URL 注入 script —— tesseract-core.asm.js 是 IIFE, 执行完 Module 就 fully initialized
-    var blob = new Blob([coreBytes], { type: 'text/javascript' });
-    var blobUrl = URL.createObjectURL(blob);
-    await new Promise(function(resolve, reject) {
-      var s = document.createElement('script');
-      s.src = blobUrl;
-      s.onload = resolve;
-      s.onerror = function(){ reject(new Error('core asm.js Blob 注入失败')); };
-      document.head.appendChild(s);
-    });
-    setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 30000);
-    // ⚠️ tesseract-core.asm.js 的 window.TesseractCoreASM 是工厂函数不是 Module!
-    // 文件结构: var TesseractCoreASM = (function(){ return function(Module){...}; })();
-    // 必须调用一次才能拿到真正的 Module 对象
-    var factory = window.TesseractCoreASM;
-    if (typeof factory !== 'function') throw new Error('core asm.js 加载但 TesseractCoreASM 不是函数, 而是: ' + typeof factory);
-    console.log('[DictImport] TesseractCoreASM 是工厂函数, 调用...');
-    var Module = factory({}); // 传入空配置对象
-    // ⚠️ tesseract-core.asm.js 工厂内部把 UTF8ToString 等当全局用, 但只挂在 Module 上
-    // 必须手动提升到全局, 否则 GetUTF8Text() 内部调 UTF8ToString 会 ReferenceError
-    // 先探测 Module 上有没有这些函数, 有就提升; 没有就自己实现 UTF8ToString
-    if (typeof Module.UTF8ToString === 'function') window.UTF8ToString = Module.UTF8ToString;
-    if (typeof Module.UTF8ArrayToString === 'function') window.UTF8ArrayToString = Module.UTF8ArrayToString;
-    if (typeof Module.intArrayToString === 'function') window.intArrayToString = Module.intArrayToString;
-    if (typeof Module.stringToUTF8 === 'function') window.stringToUTF8 = Module.stringToUTF8;
-    if (typeof Module.allocateUTF8 === 'function') window.allocateUTF8 = Module.allocateUTF8;
-    // 兜底: 如果 Module.UTF8ToString 不存在, 自己实现一个从内存指针读 C 字符串
-    if (typeof window.UTF8ToString !== 'function') {
-      window.UTF8ToString = function(ptr) {
-        if (!ptr) return '';
-        var heap = Module.HEAPU8;
-        var end = ptr;
-        while (heap[end] !== 0) end++;
-        var bytes = heap.slice(ptr, end);
-        try {
-          return new TextDecoder('utf-8').decode(bytes);
-        } catch (e) {
-          // TextDecoder 不支持? 手动解码 ASCII fallback
-          var out = '';
-          for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
-          return out;
-        }
-      };
-      console.warn('[DictImport] UTF8ToString 未从 Module 暴露, 使用自定义实现');
-    }
-    console.log('[DictImport] Module 初始化完成, keys 数量:', Object.keys(Module).length,
-      'UTF8ToString:', typeof window.UTF8ToString,
-      'TessBaseAPI:', typeof Module.TessBaseAPI);
-
-    // 4. 探测 FS API
-    var fsCreateDataFile = Module.FS_createDataFile ||
-      (Module.FS && Module.FS.createDataFile) ||
-      (typeof FS !== 'undefined' && FS.createDataFile);
-    if (!fsCreateDataFile) {
-      throw new Error('FS_createDataFile 不可用 (Module keys: ' + Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 }).join(',') + ')');
-    }
-
-    // 5. 下载 tessdata — 先查 IndexedDB, 命中 0 下载; 没有走 raceDownload (多 CDN 并行)
-    // v1.15.2: 改用未压缩版 eng.traineddata, 跳过 pako 解压 (省 1-2s + 省内存)
-    //          raceDownload 真 race: 同时从 jsdelivr + unpkg + fastly 下, 谁快用谁
-    var tdData;
-    var tdCacheKey = 'eng.traineddata@4.0.0-best';
-    var tdCached = await idbGet(tdCacheKey);
-    if (tdCached && tdCached instanceof Uint8Array && tdCached.length > 1000000) {
-      tdData = tdCached;
-      console.log('[DictImport] tessdata 命中 IndexedDB 缓存:', tdData.length, 'bytes');
-      onProgress && onProgress('tessdata 从本地缓存加载 ✓', 85);
-    } else {
-      onProgress && onProgress('下载 tessdata (15MB, 多 CDN race)...', 70);
-      console.log('[DictImport] tessdata race 下载开始, 源数:', TESSDATA_SOURCES.length);
-      tdData = await raceDownload(TESSDATA_SOURCES, 'tessdata', onProgress, 180000);
-      console.log('[DictImport] ✅ tessdata race 下载完成:', tdData.length, 'bytes');
-      try {
-        await idbPut(tdCacheKey, tdData);
-        console.log('[DictImport] tessdata 已存入 IndexedDB 缓存');
-      } catch (e) {
-        console.warn('[DictImport] tessdata IDB 缓存失败 (不影响本次):', e.message);
-      }
-    }
-    // v1.15.2: tdData 已经是未压缩的 eng.traineddata, 直接写入 MEMFS, 不再 pako 解压
-    console.log('[DictImport] tessdata 准备写入 MEMFS:', tdData.length, 'bytes');
-
-    // 6. 写入 MEMFS — v1.15.3: 加进度提示, 15MB 同步拷贝会卡 1-3s, 用户需看到反馈
-    onProgress && onProgress('写入 tessdata 到引擎内存 (15MB, 同步拷贝 1-3s, 请稍候)...', 90);
-    console.log('[DictImport] 写入 MEMFS (15MB, 同步)...');
-    var memfsT0 = Date.now();
-    try {
-      fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
-      console.log('[DictImport] MEMFS 写入成功, 耗时', (Date.now() - memfsT0) + 'ms');
-    } catch (e) {
-      throw new Error('写入 MEMFS 失败: ' + e.message);
-    }
-
-    // 7. TessBaseAPI.Init — v1.15.3: 加进度 + setTimeout 让 UI 刷新
-    //    这是真正的耗时大头 (LSTM 加载 5-20s, 主线程完全阻塞)
-    //    setTimeout(0) 让进度提示先渲染, 避免用户以为卡死
-    onProgress && onProgress('初始化 OCR 引擎 (LSTM 模型加载, 5-20s, 请耐心等待, 不要关闭页面)...', 95);
-    await new Promise(function (resolve) { setTimeout(resolve, 50); });
-    console.log('[DictImport] TessBaseAPI.Init (LSTM 加载, 同步阻塞 5-20s)...');
-    var initT0 = Date.now();
-    var api = new Module.TessBaseAPI();
-    var initResult = api.Init('/', 'eng', 1); // OEM=1
-    console.log('[DictImport] TessBaseAPI.Init 完成, 耗时', (Date.now() - initT0) + 'ms, 返回值', initResult);
-    if (initResult !== 0) throw new Error('TessBaseAPI.Init 失败, 返回值=' + initResult);
-
-    onProgress && onProgress('OCR 引擎就绪 🎉', 100);
-    console.log('[DictImport] ✅ OCR 引擎初始化完成, 累计耗时', Math.round((Date.now()-t0)/1000) + 's');
-    ocrModule = { api: api, Module: Module };
-    return ocrModule;
-  }
-
-  /** OCR 单张页面图片 (主线程 direct, 零 Worker/WASM 依赖) */
   async function ocrImage(file, onProgress) {
-    if (!ocrModule) {
-      if (ocrInitError) throw ocrInitError;
+    onProgress && onProgress('准备图片...', 10);
+
+    var imgData = await fileToBase64(file, 2400);
+    onProgress && onProgress('图片已就绪, 上传到百度 OCR...', 30);
+
+    var token = localStorage.getItem('beidanci_access_token') || '';
+    if (!token) throw new Error('未登录, 请先登录');
+
+    var resp;
+    var lastErr = null;
+    // 重试 2 次 (网络抖动 / Edge Function 冷启动)
+    for (var attempt = 0; attempt < 3; attempt++) {
       try {
-        await initDirectOcr(onProgress);
-      } catch (e) { ocrInitError = e; throw e; }
-    }
-
-    onProgress && onProgress('准备图片...', 0);
-    var canvas = await fileToCanvas(file);
-    preprocessImage(canvas);
-
-    var ctx = canvas.getContext('2d');
-    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    var api = ocrModule.api;
-    var Module = ocrModule.Module;
-
-    // 策略1: PSM 6 (统一文本块)
-    var text = '';
-    try {
-      api.SetVariable('tessedit_pageseg_mode', '6');
-      api.SetImage(imgData.data, canvas.width, canvas.height, 4, canvas.width * 4);
-      onProgress && onProgress('识别中 (PSM6)...', 0);
-      api.Recognize(null);
-      var resultPtr = api.GetUTF8Text();
-      text = UTF8ToString(resultPtr).trim();
-      Module._free(resultPtr);
-    } catch (e) {
-      console.warn('[DictImport][recognize PSM6] 失败:', e.message);
-    }
-
-    // 策略2: PSM 11 稀疏文本 (PSM6 结果太短时)
-    if (text.length < 30) {
-      try {
-        api.SetVariable('tessedit_pageseg_mode', '11');
-        api.SetImage(imgData.data, canvas.width, canvas.height, 4, canvas.width * 4);
-        onProgress && onProgress('识别中 (PSM11)...', 0);
-        api.Recognize(null);
-        var r2 = api.GetUTF8Text();
-        var t2 = UTF8ToString(r2).trim();
-        Module._free(r2);
-        if (t2.length > text.length) text = t2;
-      } catch (e2) {
-        console.warn('[DictImport][recognize PSM11] 失败:', e2.message);
+        onProgress && onProgress('上传中 (第 ' + (attempt + 1) + ' 次尝试)...', 40 + attempt * 15);
+        resp = await fetch(App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+          },
+          body: JSON.stringify({ images: [imgData] }),
+        });
+        if (resp.ok) {
+          onProgress && onProgress('百度 OCR 识别中...', 80);
+          break;
+        }
+        // HTTP 非 2xx, 不重试某些错误
+        if (resp.status === 401) throw new Error('未登录或登录已过期, 请重新登录');
+        if (resp.status === 403) throw new Error('无权限, 仅管理员可使用词典导入');
+        lastErr = new Error('服务器返回 HTTP ' + resp.status);
+      } catch (e) {
+        lastErr = e;
+        // 网络错误继续重试, 鉴权错误直接抛
+        if (e.message.indexOf('未登录') >= 0 || e.message.indexOf('无权限') >= 0) throw e;
       }
     }
-
-    return text;
-  }
-
-  /** 批次结束释放内存 */
-  async function closeOcrWorker() {
-    if (ocrModule) {
-      try { ocrModule.api.End(); } catch (e) {}
-      try {
-        // Emscripten 绑定的 TessBaseAPI 实例没有 .delete(), 用 _tesseract_delete_instance 或直接置空
-        // 这里简单置空, 让 GC 回收
-      } catch (e) {}
-      ocrModule = null;
-      ocrInitError = null;
+    if (!resp || !resp.ok) {
+      throw new Error('上传失败: ' + (lastErr ? lastErr.message : '未知错误') + ' (请检查网络)');
     }
+
+    onProgress && onProgress('解析返回结果...', 95);
+    var result = await resp.json();
+    if (result.error) throw new Error('百度 OCR 错误: ' + result.error);
+
+    var page = (result.pages && result.pages[0]) || { text: '' };
+    if (page.error) throw new Error(page.error);
+
+    onProgress && onProgress('识别完成', 100);
+    return page.text || '';
   }
 
-  /** File → Canvas (等比缩放, 手机大图安全) */
+  /** 批次结束释放内存 (v1.16.0 改百度 OCR 后, 此函数保留为空壳, 兼容 startParse 调用) */
+  function closeOcrWorker() {
+    // 百度 OCR 是无状态服务, 前端没有需要释放的资源
+  }
+
+  /** File → Canvas (等比缩放, 手机大图安全) — 保留, 预览图片用 */
   function fileToCanvas(file, maxEdge) {
     maxEdge = maxEdge || 2400;
     return new Promise(function (resolve, reject) {
@@ -564,7 +168,7 @@ App.DictImport = (function () {
     });
   }
 
-  /** 图像预处理: 灰度化 + 对比度增强 + 二值化 (提升词典印刷体识别率) */
+  /** 图像预处理: 灰度化 + 对比度增强 + 二值化 (提升词典印刷体识别率) — 保留, 预览时可用 */
   function preprocessImage(canvas) {
     var w = canvas.width, h = canvas.height;
     var ctx = canvas.getContext('2d');
@@ -589,184 +193,26 @@ App.DictImport = (function () {
     return canvas;
   }
 
-  /** OCR 环境诊断 —— 手机上无法看 console 时救命用
-   *  覆盖整条链路: UA → JS 运行时 → pako → tesseract-core.asm.js → tessdata → MEMFS → TessBaseAPI → recognize
-   *  完全不碰 Worker/WASM, 因为 ArkWeb 对这俩有坑
-   *  每一步都打印 ✅/❌ + 详细原因, 最后一键复制结果
-   */
-  async function runDiagnostics() {
+  // 占位函数 - 替换原 Tesseract 诊断面板入口, 已不再需要
+  function runDiagnostics() {
     var panel = document.getElementById('diagPanel');
-    panel.style.display = 'block';
-    var logs = [];
-    var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.12';
-    function log(icon, msg, detail) {
-      var line = icon + ' ' + msg;
-      if (detail !== undefined) line += '\n  └─ ' + detail;
-      logs.push(line);
-      panel.textContent = logs.join('\n') + '\n\n⏳ 正在检测...';
-      console.log('[DictImport][DIAG]', line);
+    if (panel) {
+      panel.style.display = 'block';
+      panel.textContent = 'OCR 诊断已弃用 (v1.16.0 改用百度 OCR, 无本地依赖)';
     }
-    log('🏷️', 'APP_VERSION', VER + ' (词典导入模块)' + (VER === EXPECTED_VER ? ' ✅' : ' ⚠️ 不是最新版, 请强制刷新 (Ctrl+Shift+R)'));
-
-    // 1. UA / 浏览器
-    log('📱', 'UserAgent', navigator.userAgent.slice(0, 140));
-    var ua = navigator.userAgent;
-    var browser = 'Unknown';
-    if (/HarmonyOS|ArkWeb/.test(ua)) browser = 'HarmonyOS (ArkWeb) — 已知 Worker/WASM 有坑';
-    else if (/iPhone|iPad/.test(ua)) browser = 'iOS Safari';
-    else if (/Android/.test(ua) && /Chrome/.test(ua)) browser = 'Android Chrome';
-    else if (/Edg/.test(ua)) browser = 'Edge';
-    else if (/Chrome/.test(ua)) browser = 'Chrome';
-    else if (/Safari/.test(ua)) browser = 'Safari';
-    log('🌐', '识别为', browser);
-
-    // 2. Canvas 2D (OCR 必须)
-    var testCanvas = document.createElement('canvas');
-    if (!testCanvas.getContext || !testCanvas.getContext('2d')) {
-      log('❌', 'Canvas 2D 不可用!', 'OCR 需要 Canvas API 处理图片');
-      showDiagResult(logs);
-      return;
-    }
-    log('✅', 'Canvas 2D 可用');
-
-    // 3. ES6 Promise + async (所有现代浏览器都支持, 但还是确认一下)
-    try {
-      await Promise.resolve(1);
-      log('✅', 'Promise/async 可用');
-    } catch (e) {
-      log('❌', 'Promise/async 异常', e.message);
-    }
-
-    // 4. pako 脚本可达性
-    log('⏳', '检测 pako 可达性...');
-    try {
-      var pakoHead = await fetch(pakoUrl, { method: 'HEAD' });
-      log(pakoHead.ok ? '✅' : '❌', 'pako ' + pakoUrl.slice(pakoUrl.indexOf('cdn.jsdelivr')), pakoHead.ok ? '可达' : ('HTTP ' + pakoHead.status));
-    } catch (e) {
-      log('❌', 'pako 可达性', '网络错误: ' + e.message);
-    }
-
-    // 5. tesseract-core.asm.js 可达性 (**这是我们真正用的, 5.6MB 纯 JS, 不碰 WASM/Worker**)
-    log('⏳', '检测 tesseract-core.asm.js 可达性 (5.6MB 纯 JS 方案)...');
-    try {
-      var coreHead = await fetch(coreAsmUrl, { method: 'HEAD' });
-      if (coreHead.ok) {
-        var size = coreHead.headers.get('content-length') || '?';
-        log('✅', 'tesseract-core.asm.js', '可达, size=' + size + ' bytes');
-      } else {
-        log('❌', 'tesseract-core.asm.js', 'HTTP ' + coreHead.status);
-      }
-    } catch (e) {
-      log('❌', 'tesseract-core.asm.js', '网络错误: ' + e.message);
-    }
-
-    // 6. tessdata 可达性
-    var tessdataCandidates = [
-      { url: './tessdata', desc: '本地' },
-      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'CDN镜像(jsdelivr)' },
-      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方源(projectnaptha)' }
-    ];
-    var reachableLangPath = null;
-    for (var ti = 0; ti < tessdataCandidates.length; ti++) {
-      var tc = tessdataCandidates[ti];
-      try {
-        var resp = await fetch(tc.url + '/eng.traineddata.gz', { method: 'HEAD' });
-        if (resp.ok) { log('✅', 'tessdata ' + tc.desc, tc.url); reachableLangPath = tc.url; break; }
-        else log('❌', 'tessdata ' + tc.desc, 'HTTP ' + resp.status);
-      } catch (e) {
-        log('❌', 'tessdata ' + tc.desc, '网络错误: ' + e.message);
-      }
-    }
-    if (!reachableLangPath) {
-      log('❌', '所有 tessdata 源均不可达', 'OCR 无法加载语言包, 请检查网络');
-      showDiagResult(logs);
-      return;
-    }
-
-    // 7. DIRECT OCR PIPELINE 测试 —— 核心! 不走 tesseract.js createWorker
-    log('⏳', '加载 pako + tesseract-core.asm.js (超时 75s)...');
-    var t0 = Date.now();
-    try {
-      // 先重置状态
-      ocrModule = null;
-      ocrInitError = null;
-      // 清掉之前可能残留的 Tesseract 全局变量, 避免干扰
-      if (window.TesseractCoreASM) {
-        // 无法真正卸载 Emscripten Module, 刷新整个 runtime 不现实
-        // 直接跳过已加载的情况
-        log('⚠️', 'tesseract-core.asm.js 已在内存中', '跳过重复加载');
-      }
-      var mod = await initDirectOcr(function(label, p) {
-        // 进度值统一约定: 0-100 整数 (initDirectOcr 和 fetchWithProgress 都这么传)
-        // 如果传了 0-1 小数 (旧代码残留), 自动乘 100 兼容
-        var pct = (p || 0) <= 1 && (p || 0) > 0 ? Math.round((p || 0) * 100) : Math.round(p || 0);
-        panel.textContent = logs.join('\n') + '\n\n⏳ ' + label + ' (' + pct + '%)';
-      });
-      log('✅', 'tesseract-core.asm.js 初始化成功', '耗时 ' + (Date.now() - t0) + 'ms · TessBaseAPI=' + typeof mod.api);
-    } catch (e) {
-      log('❌', 'tesseract-core.asm.js 初始化失败', e.message);
-      if (e.message && e.message.indexOf('超时') >= 0) {
-        log('', '诊断提示', '网络可能较慢, 建议在 WiFi 下重试; 4G/5G 首次加载 5.6MB 可能需要 10-30s');
-      }
-      showDiagResult(logs);
-      return;
-    }
-
-    // 8. 极简 recognize 测试 —— 画 "Hello World" 到 canvas 直接调 TessBaseAPI
-    log('⏳', '极简 recognize 测试 (direct TessBaseAPI)...');
-    var diagText = 'Hello World';
-    var diagCanvas = document.createElement('canvas');
-    diagCanvas.width = 300; diagCanvas.height = 80;
-    var dc = diagCanvas.getContext('2d');
-    dc.fillStyle = '#ffffff'; dc.fillRect(0, 0, 300, 80);
-    dc.fillStyle = '#000000';
-    dc.font = 'bold 36px sans-serif';
-    dc.fillText(diagText, 20, 55);
-    try {
-      var api = ocrModule.api;
-      var Module = ocrModule.Module;
-      var imgData = dc.getImageData(0, 0, 300, 80);
-      api.SetVariable('tessedit_pageseg_mode', '6');
-      api.SetImage(imgData.data, 300, 80, 4, 300 * 4);
-      var t1 = Date.now();
-      api.Recognize(null);
-      var resultPtr = api.GetUTF8Text();
-      var recognized = UTF8ToString(resultPtr).trim();
-      Module._free(resultPtr);
-      log(recognized ? '✅' : '⚠️', 'recognize (direct)',
-        recognized ? ('成功! 返回: "' + recognized + '" (' + (Date.now() - t1) + 'ms)') : '返回空文本');
-    } catch (e) {
-      log('❌', 'recognize (direct)', e.message);
-      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
-    }
-
-    // 清理
-    try { closeOcrWorker(); } catch (_) {}
-
-    showDiagResult(logs);
   }
 
-  function showDiagResult(logs) {
-    var panel = document.getElementById('diagPanel');
-    panel.textContent = logs.join('\n');
-    panel.innerHTML += '\n\n' +
-      '<button id="diagCopy" style="margin-top:10px;padding:8px 14px;background:#4A90D9;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;">📋 复制诊断结果发给开发者</button>' +
-      '<button id="diagClose" style="margin-top:10px;margin-left:8px;padding:8px 14px;background:#e9ecef;color:#333;border:none;border-radius:6px;font-size:12px;cursor:pointer;">关闭</button>';
-    var copyBtn = document.getElementById('diagCopy');
-    var closeBtn = document.getElementById('diagClose');
-    if (copyBtn) copyBtn.onclick = function () {
-      navigator.clipboard.writeText(logs.join('\n')).then(function () {
-        copyBtn.textContent = '✅ 已复制';
-      }).catch(function () {
-        var ta = document.createElement('textarea');
-        ta.value = logs.join('\n'); document.body.appendChild(ta); ta.select();
-        try { document.execCommand('copy'); copyBtn.textContent = '✅ 已复制'; } catch (e) { copyBtn.textContent = '❌ 复制失败, 请手动长按选中'; }
-        document.body.removeChild(ta);
-      });
-    };
-    if (closeBtn) closeBtn.onclick = function () { panel.style.display = 'none'; };
-  }
+  function showDiagResult() {}
+
+  // ===== 删除以下 v1.13.x Tesseract 相关代码 (720 行) =====
+  //   - getOcrAssetUrl, openIDB, idbGet, idbPut (IndexedDB 缓存)
+  //   - TESSDATA_SOURCES, raceDownload (多 CDN race)
+  //   - loadScript, withTimeout, fetchWithProgress (下载逻辑)
+  //   - initDirectOcr (Tesseract 初始化 + MEMFS + TessBaseAPI.Init)
+  //   - 旧 ocrImage (本地 OCR 主线程调用)
+  //   - runDiagnostics 完整诊断面板 (Tesseract 专用)
+  //   上述函数已被上方百度 OCR 实现替代
+  // ===== 删除结束 =====
 
   // ========== HTML 模板 ==========
   function containerHtml() {
@@ -805,10 +251,9 @@ App.DictImport = (function () {
           '<button class="btn btn-primary" id="btnCamera" style="flex:1;min-width:180px;">📷 拍照上传</button>' +
           '<button class="btn btn-outline" id="btnAlbum" style="flex:1;min-width:180px;">🖼 从相册选择</button>' +
         '</div>' +
-        '<div style="margin-bottom:12px;">' +
-          '<button class="btn btn-outline btn-sm" id="btnDiag" style="width:100%;">🔧 OCR 环境诊断（如果识别失败先点这个）</button>' +
+        '<div style="margin-bottom:12px;padding:10px 12px;background:var(--color-bg);border-radius:8px;font-size:12px;color:var(--color-text-light);line-height:1.6;">' +
+          '☁️ v1.16.0 · 百度 OCR 云端识别 (无需本地下载, 无 ArkWeb 兼容问题)' +
         '</div>' +
-        '<div id="diagPanel" style="display:none;background:#f8f9fa;border-radius:8px;padding:12px 14px;font-family:monospace;font-size:12px;max-height:50vh;overflow-y:auto;border:1px solid #eee;"></div>' +
         '<input type="file" id="fileCamera" accept="image/*" capture="environment" multiple style="display:none;">' +
         '<input type="file" id="fileAlbum" accept="image/*" multiple style="display:none;">' +
         '<div id="previewArea" style="display:none;margin-top:16px;"></div>' +
@@ -829,7 +274,6 @@ App.DictImport = (function () {
     document.getElementById('fileAlbum').addEventListener('change', onFileSelected);
     document.getElementById('btnReset').addEventListener('click', showUpload);
     document.getElementById('btnStartParse').addEventListener('click', startParse);
-    document.getElementById('btnDiag').addEventListener('click', runDiagnostics);
   }
 
   var selectedFiles = [];
