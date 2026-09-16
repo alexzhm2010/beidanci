@@ -163,6 +163,20 @@ App.Admin = (function () {
     else if (tab === 'wordbook') loadWordbookSection();
     else if (tab === 'users') loadUsersSection();
     else if (tab === 'settings') loadSettingsSection();
+    else if (tab === 'dictimport') {
+      // v1.12.0 词典导入: 懒加载 dictionary-import.js
+      if (!App.DictImport) {
+        try {
+          await import('./dictionary-import.js');
+        } catch (e) {
+          App.showToast('词典导入模块加载失败: ' + e.message, 'error');
+          return;
+        }
+      }
+      if (App.DictImport && typeof App.DictImport.init === 'function') {
+        App.DictImport.init();
+      }
+    }
   }
 
   function skeletonHtml() {

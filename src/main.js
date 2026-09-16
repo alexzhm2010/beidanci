@@ -79,6 +79,7 @@ App.initAdminNav = function () {
   if (!nav) return;
   nav.innerHTML =
     '<button class="nav-btn active" data-tab="dashboard">看板</button>' +
+    '<button class="nav-btn" data-tab="dictimport">词典导入</button>' +
     '<button class="nav-btn" data-tab="wordbook">词库</button>' +
     '<button class="nav-btn" data-tab="users">用户</button>' +
     '<button class="nav-btn" data-tab="settings">设置</button>';
@@ -111,6 +112,7 @@ function prefetchFeature(tab) {
       case 'wordbook':
       case 'users':
       case 'settings':
+      case 'dictimport':
         if (!App.Admin) import('./features/admin.js');
         break;
     }
@@ -143,6 +145,12 @@ async function ensureFeature(tab) {
       case 'users':
       case 'settings':
         // admin 4 个 tab 共用 admin.js, 只加载一次
+        if (!App.Admin) {
+          await import('./features/admin.js');
+        }
+        break;
+      case 'dictimport':
+        // v1.12.0 词典导入: admin.js 内部会再 import dictionary-import.js
         if (!App.Admin) {
           await import('./features/admin.js');
         }
@@ -288,7 +296,7 @@ App.Profile = (function () {
       App.initAdminNav();
       // 恢复上次 admin tab, 默认看板
       var lastTab = localStorage.getItem(App.Config.KEY_LAST_TAB) || 'dashboard';
-      if (['dashboard', 'wordbook', 'users', 'settings'].indexOf(lastTab) === -1) {
+      if (['dashboard', 'dictimport', 'wordbook', 'users', 'settings'].indexOf(lastTab) === -1) {
         lastTab = 'dashboard';
       }
       App.switchTab(lastTab);
@@ -522,7 +530,7 @@ document.addEventListener('DOMContentLoaded', function () {
     schedule(function () {
       // admin 用户预取 admin 模块, 普通用户预取 learning 之外的 tab
       if (App.isAdmin()) {
-        ['dashboard', 'wordbook', 'users', 'settings'].forEach(prefetchFeature);
+        ['dashboard', 'dictimport', 'wordbook', 'users', 'settings'].forEach(prefetchFeature);
       } else {
         ['library', 'stats'].forEach(prefetchFeature); // learning 一般已是首屏
       }

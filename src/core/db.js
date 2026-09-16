@@ -1129,6 +1129,174 @@ App.DB = (function () {
     });
   }
 
+  // ========== v1.12.0 词典导入 ==========
+
+  /** 创建导入批次 */
+  async function dictCreateImport(source) {
+    var uid = getUserId();
+    var row = {
+      user_id: uid,
+      source: source || 'mixed',
+      total_pages: 0,
+      total_entries: 0,
+      total_phrases: 0,
+      page_numbers: [],
+      status: 'parsing',
+      summary: {},
+    };
+    var resp = await api('POST', 'dictionary_imports', row, null, { returnResponse: true });
+    var list = await resp.json();
+    return Array.isArray(list) ? list[0] : list;
+  }
+
+  /** 批量添加页面 (每张图一行) */
+  async function dictAddPages(importId, pages) {
+    var rows = pages.map(function (p) {
+      return {
+        import_id: importId,
+        page_number: p.page_number,
+        image_url: p.image_url || null,
+        ocr_raw_text: p.ocr_raw_text || null,
+        first_headword: p.first_headword || null,
+        last_headword: p.last_headword || null,
+        parse_status: p.parse_status || 'parsed',
+        parse_duration_ms: p.parse_duration_ms || null,
+        parsed_at: new Date().toISOString(),
+      };
+    });
+    return await api('POST', 'dictionary_pages', rows);
+  }
+
+  /** 批量添加词条 */
+  async function dictAddEntries(importId, entries) {
+    var rows = entries.map(function (e) {
+      return {
+        import_id: importId,
+        page_id: e.page_id,
+        entry_type: e.entry_type || 'word',
+        word: e.word,
+        phonetic: e.phonetic || null,
+        part_of_speech: e.part_of_speech || null,
+        meanings: e.meanings || [],
+        derivatives: e.derivatives || [],
+        phrases: e.phrases || [],
+        special_examples: e.special_examples || [],
+        row_order: e.row_order || 0,
+        review_status: 'pending',
+      };
+    });
+    return await api('POST', 'dictionary_entries', rows);
+  }
+
+  /** 完成批次: 更新汇总 (总页数、词条数、页码集合、状态→review) */
+  async function dictFinalizeImport(importId, totalEntries, totalPhrases, pageNumbers, summary) {
+    var row = {
+      total_entries: totalEntries,
+      total_phrases: totalPhrases,
+      total_pages: pageNumbers.length,
+      page_numbers: pageNumbers,
+      status: 'review',
+      summary: summary || {},
+    };
+    return await api('PATCH', 'dictionary_imports', row, 'id=eq.' + encodeURIComponent(importId));
+  }
+
+  /** 列出当前用户的所有导入批次 */
+  async function dictGetImports() {
+    var uid = getUserId();
+    var base = 'user_id=eq.' + encodeURIComponent(uid) + '&order=created_at.desc';
+    return await fetchAllPages('dictionary_imports', base, function (r) { return r; });
+  }
+
+  /** 获取批次详情: 页面列表 + 词条列表 */
+  async function dictGetImportDetail(importId) {
+    var importResp = await api('GET', 'dictionary_imports', 'id=eq.' + encodeURIComponent(importId));
+    var importRow = Array.isArray(importResp) ? importResp[0] : importResp;
+    var pages = await fetchAllPages('dictionary_pages',
+      'import_id=eq.' + encodeURIComponent(importId) + '&order=page_number',
+      function (r) { return r; });
+    var entries = await fetchAllPages('dictionary_entries',
+      'import_id=eq.' + encodeURIComponent(importId) + '&order=page_id,row_order',
+      function (r) { return r; });
+    return { import: importRow, pages: pages, entries: entries };
+  }
+
+  /** 更新单个词条的审核状态 (pending→accepted/rejected) */
+  async function dictUpdateEntryStatus(entryId, reviewStatus) {
+    return await api('PATCH', 'dictionary_entries',
+      { review_status: reviewStatus },
+      'id=eq.' + encodeURIComponent(entryId));
+  }
+
+  /** 发布批次: 把 accepted 词条写入 words 表 */
+  async function dictPublishImport(importId) {
+    var uid = getUserId();
+    var entries = await fetchAllPages('dictionary_entries',
+      'import_id=eq.' + encodeURIComponent(importId) +
+      '&review_status=eq.accepted',
+      function (r) { return r; });
+
+    if (entries.length === 0) {
+      await api('PATCH', 'dictionary_imports',
+        { status: 'failed', summary: { error: '没有已审核(accepted)的词条' } },
+        'id=eq.' + encodeURIComponent(importId));
+      return { published: 0, merged: 0 };
+    }
+
+    var existing = await getAllWords();
+    var existingSet = {};
+    existing.forEach(function (w) { existingSet[w.word.toLowerCase()] = true; });
+
+    var wordRows = entries.map(function (e) {
+      var firstZhDef = '';
+      var examples = [];
+      if (Array.isArray(e.meanings) && e.meanings.length > 0) {
+        firstZhDef = e.meanings[0].zh_def || '';
+        e.meanings.forEach(function (m) {
+          if (Array.isArray(m.examples)) {
+            m.examples.forEach(function (ex) {
+              if (ex.en && ex.zh) examples.push(ex.en + ' — ' + ex.zh);
+            });
+          }
+        });
+      }
+      return {
+        id: _uuid(),
+        user_id: uid,
+        word: e.word,
+        phonetic: e.phonetic || '',
+        part_of_speech: e.part_of_speech || '',
+        chinese_meaning: firstZhDef,
+        example_sentence: examples.join('\n'),
+        total_count: 0,
+        known_count: 0,
+        stability: 0,
+        next_review_at: 0,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      };
+    }).filter(function (w) { return !existingSet[w.word.toLowerCase()]; });
+
+    var BATCH = 50;
+    for (var i = 0; i < wordRows.length; i += BATCH) {
+      await api('POST', 'words', wordRows.slice(i, i + BATCH));
+    }
+
+    await api('PATCH', 'dictionary_imports',
+      { status: 'published', published_at: new Date().toISOString() },
+      'id=eq.' + encodeURIComponent(importId));
+
+    invalidateCache();
+    return { published: wordRows.length, merged: entries.length - wordRows.length };
+  }
+
+  /** 丢弃批次 */
+  async function dictDiscardImport(importId) {
+    return await api('PATCH', 'dictionary_imports',
+      { status: 'discarded' },
+      'id=eq.' + encodeURIComponent(importId));
+  }
+
   // ========== 导出 ==========
 
   return {
@@ -1189,9 +1357,18 @@ App.DB = (function () {
     getUnreadMessages: getUnreadMessages,
     markMessageRead: markMessageRead,
     // v1.10.0 预置词库
-    syncPresetWords: syncPresetWords,
+  syncPresetWords: syncPresetWords,
     // v1.11.1 缓存控制
     invalidateCache: invalidateCache,
+    // v1.12.0 词典导入
+    dictCreateImport: dictCreateImport,
+    dictAddPages: dictAddPages,
+    dictAddEntries: dictAddEntries,
+    dictGetImports: dictGetImports,
+    dictGetImportDetail: dictGetImportDetail,
+    dictUpdateEntryStatus: dictUpdateEntryStatus,
+    dictPublishImport: dictPublishImport,
+    dictDiscardImport: dictDiscardImport,
   };
 })();
 
