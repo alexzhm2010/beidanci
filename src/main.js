@@ -21,6 +21,7 @@ import './core/auth.js';
 import '../css/style.css';
 
 window.App = window.App || {};
+App.VERSION = App.Config.APP_VERSION;  // 暴露给诊断面板等运行时检查版本号
 
 // ========== 共享工具函数 ==========
 

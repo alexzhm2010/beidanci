@@ -250,6 +250,7 @@ App.DictImport = (function () {
     var panel = document.getElementById('diagPanel');
     panel.style.display = 'block';
     var logs = [];
+    var VER = (window.App && window.App.VERSION) || 'unknown';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
@@ -257,6 +258,7 @@ App.DictImport = (function () {
       panel.textContent = logs.join('\n') + '\n\n⏳ 正在检测...';
       console.log('[DictImport][DIAG]', line);
     }
+    log('🏷️', 'APP_VERSION', VER + ' (词典导入模块)' + (VER === '1.12.1' ? ' ✅' : ' ⚠️ 不是最新版, 请强制刷新'));
 
     // 1. UA / 浏览器
     log('📱', 'UserAgent', navigator.userAgent.slice(0, 120));
@@ -341,44 +343,39 @@ App.DictImport = (function () {
       }
     }
 
-    // 7. createWorker —— legacyCore: true (当前方案)
-    log('⏳', 'createWorker (legacyCore: true)...');
-    var wLegacy = null, wLegacyErr = null;
-    var t0 = Date.now();
+    // 7. createWorker 测试 —— v5 先试 (25s 超时), 超时自动切 v4 (45s)
+    var finalW = null, finalVer = null;
+
+    // ===== v5 测试 =====
+    log('⏳', 'createWorker v5.1.0 (WASM, 超时 25s)...');
     try {
-      wLegacy = await Tesseract.createWorker('eng', 1, {
-        langPath: reachableLangPath,
-        legacyCore: true,
-        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/',
-        logger: function () {},
-        errorHandler: function () {}
-      });
-      log('✅', 'createWorker legacyCore', '成功! 耗时 ' + (Date.now() - t0) + 'ms');
-    } catch (e) {
-      wLegacyErr = e;
-      log('❌', 'createWorker legacyCore', e.message);
-      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+      var T5 = await loadTesseractVersion('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js');
+      var w5 = await withTimeout(T5.createWorker('eng', 1, { langPath: reachableLangPath, logger: function() {} }), 25000, 'v5 createWorker');
+      log('✅', 'createWorker v5', '成功! 但鸿蒙浏览器 SIMD 不支持, 可能 recognize 时才炸');
+      finalW = w5; finalVer = 'v5';
+    } catch (e5) {
+      log('❌', 'createWorker v5', e5.message);
+      try { if (finalW) await finalW.terminate(); } catch (_) {}
+      finalW = null;
+
+      // ===== v4 asm.js 测试 =====
+      log('⏳', 'createWorker v4.1.1 (asm.js 纯 JS, 超时 45s)...');
+      try {
+        var T4 = await loadTesseractVersion('https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js');
+        var t0 = Date.now();
+        var w4 = await withTimeout(T4.createWorker('eng', 1, { langPath: reachableLangPath, logger: function() {} }), 45000, 'v4 createWorker');
+        log('✅', 'createWorker v4', '成功! 耗时 ' + (Date.now() - t0) + 'ms');
+        finalW = w4; finalVer = 'v4';
+      } catch (e4) {
+        log('❌', 'createWorker v4', e4.message);
+        log('', 'v5→v4 双版本都失败, OCR 不可用');
+      }
     }
 
-    // 8. createWorker —— 默认 SIMD (对比)
-    log('⏳', 'createWorker (默认 SIMD)...');
-    var wSimd = null, wSimdErr = null;
-    try {
-      wSimd = await Tesseract.createWorker('eng', 1, {
-        langPath: reachableLangPath,
-        logger: function () {},
-        errorHandler: function () {}
-      });
-      log('⚠️', 'createWorker 默认 SIMD', '也成功了! 但可能 recognize 时才炸');
-    } catch (e) {
-      wSimdErr = e;
-      log('❌', 'createWorker 默认 SIMD', e.message);
-    }
-
-    // 9. 极简 recognize 测试 —— 用一张纯文字的小 canvas
-    log('⏳', '极简 recognize 测试...');
-    var diagText = 'Hello World';
-    try {
+    // 8. 极简 recognize 测试 —— 纯 canvas 画 "Hello World"
+    if (finalW) {
+      log('⏳', '极简 recognize 测试 (with ' + finalVer + ' worker)...');
+      var diagText = 'Hello World';
       var diagCanvas = document.createElement('canvas');
       diagCanvas.width = 300; diagCanvas.height = 80;
       var dc = diagCanvas.getContext('2d');
@@ -386,31 +383,18 @@ App.DictImport = (function () {
       dc.fillStyle = '#000000';
       dc.font = 'bold 36px sans-serif';
       dc.fillText(diagText, 20, 55);
-
-      if (wLegacy) {
-        log('⏳', 'recognize with legacyCore worker...');
+      try {
         var t1 = Date.now();
-        var r1 = await wLegacy.recognize(diagCanvas);
-        var recognized = (r1.data && r1.data.text || '').trim();
-        log(recognized ? '✅' : '⚠️', 'recognize legacyCore',
+        var r = await finalW.recognize(diagCanvas);
+        var recognized = (r.data && r.data.text || '').trim();
+        log(recognized ? '✅' : '⚠️', 'recognize',
           recognized ? ('成功! 返回: "' + recognized + '" (' + (Date.now() - t1) + 'ms)') : '返回空文本');
+      } catch (e) {
+        log('❌', 'recognize', e.message);
+        log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
       }
-      if (wSimd) {
-        log('⏳', 'recognize with SIMD worker...');
-        var t2 = Date.now();
-        var r2 = await wSimd.recognize(diagCanvas);
-        var r2t = (r2.data && r2.data.text || '').trim();
-        log(r2t ? '✅' : '❌', 'recognize SIMD',
-          r2t ? ('成功! 返回: "' + r2t + '" (' + (Date.now() - t2) + 'ms)') : '返回空文本');
-      }
-    } catch (e) {
-      log('❌', 'recognize 失败', e.message);
-      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+      try { await finalW.terminate(); } catch (_) {}
     }
-
-    // 清理
-    try { if (wLegacy) await wLegacy.terminate(); } catch (e) {}
-    try { if (wSimd) await wSimd.terminate(); } catch (e) {}
 
     showDiagResult(logs);
   }
