@@ -134,7 +134,10 @@ App.DictImport = (function () {
       // 超时保险
       setTimeout(resolve, 30000);
     });
-    console.log('[DictImport] tesseract-core.asm.js runtime 初始化完成');
+    // 双保险: 再等一帧, 确保 Module["FS_createDataFile"] 等别名都挂上
+    await new Promise(function(r){ setTimeout(r, 100); });
+    console.log('[DictImport] tesseract-core.asm.js runtime 初始化完成, Module keys:',
+      Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 || k.indexOf('Tess')>=0 }).join(','));
 
     // 4. 下载 tessdata + gunzip + 写入 MEMFS
     onProgress && onProgress('下载 tessdata...', 0.6);
@@ -148,8 +151,19 @@ App.DictImport = (function () {
     var tdData = pako.ungzip(new Uint8Array(tdBuf));
     console.log('[DictImport] tessdata 解压后大小:', tdData.length, 'bytes');
 
-    // 5. 写入 MEMFS
-    Module.FS_createDataFile('/', 'eng.traineddata', tdData, true, true, true);
+    // 5. 写入 MEMFS —— 探测 FS API 风格 (新旧 Emscripten 版本不一致)
+    var fsCreateDataFile = Module.FS_createDataFile ||
+      (Module.FS && Module.FS.createDataFile) ||
+      (typeof FS !== 'undefined' && FS.createDataFile);
+    if (!fsCreateDataFile) {
+      // 手动建文件夹路径再创建文件
+      Module.FS.createPath('/', '');
+      fsCreateDataFile = Module.FS.createDataFile;
+    }
+    console.log('[DictImport] 使用 FS API:',
+      Module.FS_createDataFile ? 'Module.FS_createDataFile' :
+      (Module.FS && Module.FS.createDataFile) ? 'Module.FS.createDataFile' : 'unknown');
+    fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
 
     // 6. 创建 TessBaseAPI + Init
     onProgress && onProgress('初始化 TessBaseAPI...', 0.9);
@@ -289,7 +303,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.1';
+    var EXPECTED_VER = '1.13.2';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
