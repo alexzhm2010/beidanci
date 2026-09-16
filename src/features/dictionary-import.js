@@ -214,9 +214,15 @@ App.DictImport = (function () {
     var token = localStorage.getItem('beidanci_access_token') || '';
     if (!token) {
       addLog('❌', 'AUTH', '未登录 (localStorage 无 beidanci_access_token)');
-      throw new Error('未登录, 请先登录');
+      // 抛带"请登录"的错误, startParse catch 块会显示出来 + 留下重试入口
+      var noTokenErr = new Error('未登录, 请先在主界面登录后再进入词典导入页');
+      noTokenErr.isAuthError = true;
+      throw noTokenErr;
     }
     addLog('🔑', 'AUTH', 'Token 已从 localStorage 取出', '长度: ' + token.length + ', 前10字符: ' + token.slice(0, 10) + '...');
+    // 同时检查 uid (管理员标识)
+    var uid = localStorage.getItem(App.Config.KEY_UID) || '';
+    addLog('👤', 'AUTH', '当前 uid', uid || '(无)');
 
     var url = App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL;
     addLog('🌐', 'EDGE', '准备调 Edge Function', 'URL: ' + url);
@@ -439,7 +445,13 @@ App.DictImport = (function () {
     mountDebugPanel();
     addLog('🚀', 'INIT', '词典导入模块 v' + ((window.App && window.App.VERSION) || '?') + ' 已就绪');
     addLog('📋', 'INIT', 'EDGE_FUNCTIONS.BAIDU_OCR_URL', App.Config && App.Config.EDGE_FUNCTIONS && App.Config.EDGE_FUNCTIONS.BAIDU_OCR_URL);
-    addLog('📋', 'INIT', 'localStorage token 状态', (localStorage.getItem('beidanci_access_token') ? '已存在 (长度 ' + localStorage.getItem('beidanci_access_token').length + ')' : '❌不存在'));
+    var initToken = localStorage.getItem('beidanci_access_token');
+    var initUid = App.Config && App.Config.KEY_UID ? localStorage.getItem(App.Config.KEY_UID) : null;
+    addLog('📋', 'INIT', '会话状态检查', {
+      access_token: initToken ? '✅ 已存在 (长度 ' + initToken.length + ')' : '❌ 不存在',
+      uid: initUid ? '✅ 已存在 (uid=' + initUid + ')' : '❌ 不存在',
+      提示: initToken ? '已登录, 可调 Edge Function' : '未登录! 请先在主界面登录后再来词典导入页',
+    });
   }
 
   var selectedFiles = [];
