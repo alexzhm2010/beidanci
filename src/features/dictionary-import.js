@@ -217,7 +217,7 @@ App.DictImport = (function () {
     }
     if (!window.pako) throw new Error('pako 加载失败');
 
-    // 2. 加载 tesseract-core.asm.js (5.4MB — 先查 IndexedDB 缓存, 没有再 fetch)
+    // 先查 IndexedDB 缓存, 没有再 fetch (jsdelivr CDN 优先, 同源 fallback 最后)
     var t0 = Date.now();
     var coreBytes;
     var coreCacheKey = 'tesseract-core.asm.js@4.0.1';
@@ -227,23 +227,26 @@ App.DictImport = (function () {
       console.log('[DictImport] core asm.js 命中 IndexedDB 缓存:', coreBytes.length, 'bytes');
       onProgress && onProgress('core asm.js 从本地缓存加载 ✓', 15);
     } else {
-      // 同源优先, 失败 fallback jsdelivr
+      // jsdelivr CDN 有国内节点 (0.9s 下完 5.4MB), GitHub Pages 在国内极慢/network error
       var coreSrcList = [
-        { url: getOcrAssetUrl('tesseract-core.asm.js'), desc: '同源' },
-        { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js', desc: 'jsdelivr CDN' }
+        { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js', desc: 'jsdelivr CDN (国内最快)' },
+        { url: getOcrAssetUrl('tesseract-core.asm.js'), desc: '同源 fallback' },
       ];
-      onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB)...', 10);
+      onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB, jsdelivr CDN)...', 10);
       var coreErr = null;
       for (var ci = 0; ci < coreSrcList.length; ci++) {
         try {
           coreBytes = await fetchWithProgress(coreSrcList[ci].url, 'core asm.js (' + coreSrcList[ci].desc + ')', onProgress, 180000);
-          console.log('[DictImport] core asm.js 下载完成 (' + coreSrcList[ci].desc + '):', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
-          await idbPut(coreCacheKey, coreBytes); // 存缓存
+          console.log('[DictImport] ✅ core asm.js 下载完成 (' + coreSrcList[ci].desc + '):', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
+          await idbPut(coreCacheKey, coreBytes);
           coreErr = null;
           break;
-        } catch (e) { coreErr = e; }
+        } catch (e) {
+          console.warn('[DictImport] ❌ core asm.js 源失败 (' + coreSrcList[ci].desc + '):', e.message);
+          coreErr = e;
+        }
       }
-      if (coreErr) throw new Error('tesseract-core.asm.js 下载失败: ' + coreErr.message);
+      if (coreErr) throw new Error('tesseract-core.asm.js 所有源均失败, 最后错误: ' + coreErr.message + ' (建议检查网络或切换 WiFi)');
     }
 
     // Blob URL 注入 script —— tesseract-core.asm.js 是 IIFE, 执行完 Module 就 fully initialized
@@ -442,7 +445,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.8';
+    var EXPECTED_VER = '1.13.9';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
