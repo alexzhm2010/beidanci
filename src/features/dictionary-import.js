@@ -15,10 +15,14 @@ App.DictImport = (function () {
 
   var MAX_PAGES = 10;
 
-  // ========== OCR 引擎 (对齐 library.js 成熟实现) ==========
+  // ========== OCR 引擎 (双版本自动回退) ==========
   var ocrWorker = null;
   var ocrInitError = null;
   var tessdataUrlCache = null;
+  var ocrVer = null;   // 'v5' or 'v4' 记录当前成功初始化的版本
+
+  var TESSERACT_V5_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
+  var TESSERACT_V4_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js';
 
   /** 探测 tessdata 最佳来源 (本地 → CDN → 官方) */
   async function getTessdataUrl(onProgress) {
@@ -90,66 +94,113 @@ App.DictImport = (function () {
     return canvas;
   }
 
-  async function ensureTesseract() {
-    if (window.Tesseract) return window.Tesseract;
-    await new Promise(function (resolve, reject) {
+  /** 动态加载指定版本的 tesseract.js (不会缓存到 window, 避免 v4/v5 冲突) */
+  function loadTesseractVersion(url) {
+    return new Promise(function (resolve, reject) {
+      // 如果 window.Tesseract 已经是目标版本, 直接返回
+      var existingVer = (window.Tesseract && window.Tesseract.VERSION);
+      if (existingVer) {
+        if (url.indexOf('@5.1.0') > 0 && String(existingVer).startsWith('5')) return resolve(window.Tesseract);
+        if (url.indexOf('@4.1.1') > 0 && String(existingVer).startsWith('4')) return resolve(window.Tesseract);
+      }
+      // 清掉旧的, 防止两个版本的全局变量冲突
+      window.Tesseract = undefined;
       var s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
+      s.src = url;
       s.onload = function () {
-        if (window.Tesseract) resolve();
-        else reject(new Error('Tesseract.js 已加载但 Tesseract 未定义'));
+        if (window.Tesseract) resolve(window.Tesseract);
+        else reject(new Error('脚本已加载但 Tesseract 未定义'));
       };
-      s.onerror = function () { reject(new Error('Tesseract.js 加载失败, 请检查网络')); };
+      s.onerror = function () { reject(new Error('脚本加载失败: ' + url)); };
       document.head.appendChild(s);
     });
-    return window.Tesseract;
   }
 
-  /** OCR 单张页面图片, 返回完整文本 (多 PSM 策略, 自动预处理) */
+  /** 给 Promise 加超时 —— createWorker 在 ArkWeb 上可能永远挂起 */
+  function withTimeout(promise, ms, label) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () { reject(new Error(label + ' 超时 (' + ms + 'ms), ArkWeb/鸿蒙浏览器 WASM 支持有坑')); }, ms);
+      promise.then(
+        function (v) { clearTimeout(timer); resolve(v); },
+        function (e) { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
+  /** 创建 OCR Worker —— 双版本自动回退
+   *  1. 先试 tesseract.js v5 (WASM, 快)
+   *  2. 如果 v5 超时或失败 → 切 v4.1.1 (asm.js 纯 JS, 100% 兼容所有手机)
+   */
+  async function createOcrWorker(onProgress) {
+    var langPath = await getTessdataUrl(onProgress);
+
+    async function tryCreate(ver, Tesseract, timeoutMs) {
+      var label = ver === 'v5' ? 'v5 (WASM, 快)' : 'v4.1.1 (asm.js, 兼容所有手机)';
+      console.log('[DictImport] 尝试 createWorker ' + label);
+      onProgress && onProgress('创建 OCR Worker ' + label + '...', 0);
+
+      var opts = {
+        langPath: langPath,
+        logger: function (m) {
+          var p = m.progress || 0;
+          var map = {
+            'loading tesseract core': '加载OCR核心',
+            'initializing tesseract': '初始化OCR引擎',
+            'loading language traineddata': '加载语言包',
+            'initializing api': '初始化API',
+            'recognizing text': '识别中'
+          };
+          var lbl = map[m.status] || m.status || '处理中';
+          if (p - ((ocrWorker && ocrWorker.__lastP) || 0) > 0.08 || p >= 0.999) {
+            if (ocrWorker) ocrWorker.__lastP = p;
+            onProgress && onProgress(lbl, p);
+          }
+        }
+      };
+
+      // v5 用 oem=1 (LSTM+Legacy), v4 默认
+      return await withTimeout(Tesseract.createWorker('eng', 1, opts), timeoutMs, 'createWorker ' + label);
+    }
+
+    // ===== 尝试 v5 (超时 25s) =====
+    try {
+      var T5 = await loadTesseractVersion(TESSERACT_V5_URL);
+      ocrWorker = await tryCreate('v5', T5, 25000);
+      ocrVer = 'v5';
+      console.log('[DictImport] ✅ v5 OCR Worker 创建成功');
+      onProgress && onProgress('OCR 引擎就绪 (v5, WASM 加速)', 1);
+      return;
+    } catch (e) {
+      console.warn('[DictImport] v5 失败:', e.message, '| 回退 v4');
+      try { if (ocrWorker) { await ocrWorker.terminate(); } } catch (_) {}
+      ocrWorker = null;
+      ocrInitError = null;
+    }
+
+    // ===== 尝试 v4 asm.js (超时 45s, 纯 JS 解析大一些) =====
+    try {
+      var T4 = await loadTesseractVersion(TESSERACT_V4_URL);
+      onProgress && onProgress('v5 在本手机不兼容, 切换到 v4 (asm.js)...', 0);
+      ocrWorker = await tryCreate('v4', T4, 45000);
+      ocrVer = 'v4';
+      console.log('[DictImport] ✅ v4 OCR Worker 创建成功');
+      onProgress && onProgress('OCR 引擎就绪 (v4, asm.js 兼容模式)', 1);
+    } catch (e2) {
+      ocrInitError = e2;
+      console.error('[DictImport] ❌ v4 也失败:', e2.message);
+      throw new Error('OCR 引擎初始化失败 (v5→v4 双版本都没跑起来): ' + (e2.message || e2));
+    }
+  }
+
+  /** OCR 单张页面图片, 返回完整文本 */
   async function ocrImage(file, onProgress) {
-    var Tesseract = await ensureTesseract();
-    if (typeof Tesseract === 'undefined') throw new Error('OCR 引擎加载失败');
+    if (typeof window.Tesseract === 'undefined') throw new Error('OCR 引擎加载失败');
 
     if (!ocrWorker) {
       if (ocrInitError) throw ocrInitError;
       try {
-        var langPath = await getTessdataUrl(onProgress);
-        console.log('[DictImport] UA:', navigator.userAgent.slice(0, 100));
-        var workerOpts = {
-          langPath: langPath,
-          // 【铁腕方案】永远禁用 SIMD, 用 legacy core
-          // 原因: 多款国产浏览器内核 (华为 ArkWeb/Chromium M114 等) 虽然声称
-          // 支持 SIMD v128, 但 Worker 内跑 SIMD WASM 会静默崩溃, 表现为
-          // Worker 不再发消息 → 主线程超时 → JSON.parse('') 报错 "empty and invalid json"
-          // legacyCore 非 SIMD 版所有 WASM 浏览器都兼容, 词典导入低频, 慢 20% 可接受
-          legacyCore: true,
-          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/',
-          logger: function (m) {
-            var p = m.progress || 0;
-            var map = {
-              'loading tesseract core': '加载OCR核心',
-              'initializing tesseract': '初始化OCR引擎',
-              'loading language traineddata': '加载语言包',
-              'initializing api': '初始化API',
-              'recognizing text': '识别中'
-            };
-            var label = map[m.status] || m.status || '处理中';
-            if (p - (ocrWorker.__lastP || 0) > 0.08 || p >= 0.999) {
-              ocrWorker.__lastP = p;
-              onProgress && onProgress(label, p);
-            }
-          }
-        };
-        onProgress && onProgress('创建 OCR Worker (legacy core)...', 0);
-        ocrWorker = await Tesseract.createWorker('eng', 1, workerOpts);
-        console.log('[DictImport] OCR Worker 创建成功 (legacyCore=true)');
-      } catch (e) {
-        ocrInitError = e;
-        console.error('[DictImport][createWorker] 失败:', e.message);
-        console.error('[DictImport][createWorker] 完整错误:', e);
-        console.error('[DictImport][createWorker] 堆栈:', e.stack);
-        throw new Error('OCR引擎初始化失败 (createWorker): ' + (e.message || e));
-      }
+        await createOcrWorker(onProgress);
+      } catch (e) { throw e; }
     }
 
     onProgress && onProgress('准备图片...', 0);
@@ -163,7 +214,7 @@ App.DictImport = (function () {
       var r1 = await ocrWorker.recognize(canvas, { tessedit_pageseg_mode: '6' });
       text = (r1.data && r1.data.text || '').trim();
     } catch (e) {
-      console.warn('[DictImport][recognize PSM6] 失败:', e.message, '| stack:', e.stack);
+      console.warn('[DictImport][recognize PSM6] 失败:', e.message);
     }
 
     // 策略2: PSM 6 结果太短时用 PSM 11 (稀疏文本)
@@ -187,6 +238,7 @@ App.DictImport = (function () {
       try { await ocrWorker.terminate(); } catch (e) {}
       ocrWorker = null;
       ocrInitError = null;
+      ocrVer = null;
     }
   }
 
