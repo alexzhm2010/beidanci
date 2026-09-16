@@ -1,55 +1,709 @@
 /**
- * 词典导入模块 (v1.14.0) — AI 视觉直接解析, 彻底删除 Tesseract
+ * 词典导入模块 (v1.13.0) — OCR 引擎彻底重写
+ * Admin 专属功能: 从词典拍照 → OCR → 结构化解析 → 审核 → 发布
  *
- * v1.14.0 重大架构变更:
- *   v1.13.x 方案: Tesseract.js → OCR 文本 → 前端正则解析 → 词条
- *   依赖链: pako + tesseract-core.asm.js (5.4MB) + tessdata (11MB) + Emscripten runtime
- *   → 9 步链路, 每步在 ArkWeb 上都有坑, 最终无法稳定运行
- *
- *   v1.14.0 方案: 前端上传图片 → Supabase Edge Function → Google Gemini Vision
- *   → 直接返回结构化 JSON (OCR + 解析一步到位)
- *   → 零本地依赖, 任何浏览器都能跑, 链路从 9 步缩短到 1 步
+ * v1.13.0 根因修复:
+ *   HarmonyOS NEXT / ArkWeb 浏览器的 Web Worker + WASM 有坑
+ *   tesseract.js v4/v5 的 createWorker() 内部硬编码走 Worker, 双版本全超时
+ *   → 彻底放弃 tesseract.js 框架, 直接用 tesseract-core.asm.js (5.6MB 纯 JS)
+ *     + pako 解压 tessdata, 完全在主线程跑, 零 Worker/WASM 依赖
  *
  * 流程:
  *   1. 上传 (拍照/相册, 最多10张)
- *   2. AI 解析 (图片 base64 → Edge Function → Gemini → 结构化词条 JSON)
- *   3. 保存批次到 dictionary_imports + dictionary_pages + dictionary_entries
- *   4. 审核 (admin 逐条确认/拒绝)
- *   5. 发布 (accepted 词条写入 words 表)
+ *   2. OCR (tesseract-core.asm.js 直接调 TessBaseAPI, 主线程跑)
+ *   3. 解析 (按词典排版规则切分 headword/义项/派生词/词组)
+ *   4. 保存批次到 dictionary_imports + dictionary_pages + dictionary_entries
+ *   5. 审核 (admin 逐条确认/拒绝)
+ *   6. 发布 (accepted 词条写入 words 表)
  */
 window.App = window.App || {};
 App.DictImport = (function () {
 
   var MAX_PAGES = 10;
 
-  // ========== Step 1: 上传界面 ==========
+  // ========== OCR 引擎: 直接 tesseract-core.asm.js 主线程跑 ==========
+  // 根因: HarmonyOS NEXT / ArkWeb 的 Web Worker + WASM 有坑
+  //       tesseract.js v4/v5 createWorker 内部硬编码用 Worker, 全挂
+  //       ArkWeb 对跨域 fetch 大文件 (5.6MB) 不稳定, 随机 Failed to fetch
+  // 方案: 跳过 tesseract.js 框架, 直接调 tesseract-core.asm.js (纯 JS)
+  //       + pako 解压 tessdata, 完全不碰 WASM 和 Worker
+  //       + 所有 OCR 资源打包到 public/ 目录, 同源加载, 零 CORS 零 fetch 限制
+  var ocrModule = null;   // { api, Module } 初始化成功后存 TessBaseAPI 实例
+  var ocrInitError = null;
+  var tessdataUrlCache = null;
 
+  /** 从当前 location 推算同源资源的正确 base path
+   *  适配场景: dev server / GitHub Pages 子路径 / 任意静态托管
+   *  例: https://alexzhm2010.github.io/beidanci/ + pako.min.js → '/beidanci/pako.min.js'
+   *      http://localhost:5174/ + pako.min.js → '/pako.min.js'
+   */
+  function getOcrAssetUrl(assetName) {
+    var path = location.pathname;
+    if (!path.endsWith('/')) {
+      var lastSlash = path.lastIndexOf('/');
+      path = path.substring(0, lastSlash + 1);
+    }
+    return path + assetName;
+  }
+
+  // 同源静态资源 — 已打包进 public/, 极速 + 零 CORS 问题
+  // 动态适配部署 base path
+  var pakoUrl = getOcrAssetUrl('pako.min.js');
+  var coreAsmUrl = getOcrAssetUrl('tesseract-core.asm.js');
+
+  /** 探测 tessdata 最佳来源 */
+  /** IndexedDB 缓存 — 持久化大体积 OCR 资源, 下次零下载
+   *  存 eng.traineddata.gz 和 tesseract-core.asm.js
+   *  用 'beidanci-ocr-cache' db, 'resources' store
+   */
+  var IDB_NAME = 'beidanci-ocr-cache';
+  var IDB_STORE = 'resources';
+
+  function openIDB() {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function(e) {
+        e.target.result.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = function(e) { resolve(e.target.result); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  }
+
+  async function idbGet(key) {
+    try {
+      var db = await openIDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readonly');
+        var r = tx.objectStore(IDB_STORE).get(key);
+        r.onsuccess = function() { resolve(r.result || null); };
+        r.onerror = function() { resolve(null); };
+      });
+    } catch (e) { return null; }
+  }
+
+  async function idbPut(key, value) {
+    try {
+      var db = await openIDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = function() { resolve(); };
+        tx.onerror = function() { /* ignore */ };
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  /** tessdata 源列表 — 排 jsdelivr 第一, 有国内节点 1s 下完 11MB
+   *  GitHub Pages 同源放在最后 (国内 CDN 极慢, 30s+ 还超时)
+   */
+  async function getTessdataUrl(onProgress) {
+    if (tessdataUrlCache) return tessdataUrlCache;
+    var candidates = [
+      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'jsdelivr CDN (国内最快, 1s)', trusted: true },
+      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方 projectnaptha', trusted: true },
+      { url: getOcrAssetUrl('tessdata'), desc: '本地同源 (GitHub Pages 国内慢)', trusted: true },
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        var resp = await fetch(candidates[i].url + '/eng.traineddata.gz', { method: 'HEAD' });
+        if (resp.ok) { tessdataUrlCache = candidates[i].url; break; }
+      } catch (e) { /* 继续试下一个 */ }
+    }
+    if (!tessdataUrlCache) throw new Error('所有 tessdata 源均不可达');
+    console.log('[DictImport] tessdata 源:', tessdataUrlCache);
+    return tessdataUrlCache;
+  }
+
+  /** 加载脚本 —— 同源用 script 标签, 跨域 fallback fetch+Blob URL
+   *  同源资源 (public/ 目录下) 没有 CORS/nosniff 问题, 直接 <script src> 最快
+   *  跨域资源 fallback 到 fetch+Blob URL 绕过 ArkWeb 严格校验
+   */
+  function loadScript(url) {
+    var isSameOrigin = /^\/[^/]/.test(url) || url.indexOf(location.origin) === 0;
+    return new Promise(function (resolve, reject) {
+      var script = document.createElement('script');
+      script.src = url;
+      script.onload = resolve;
+      script.onerror = function () {
+        if (isSameOrigin) {
+          // 同源理论上不应该失败
+          reject(new Error('同源脚本加载失败: ' + url));
+        } else {
+          // 跨域 fallback: fetch → Blob URL (绕过 nosniff/CORS 限制)
+          fetch(url, { credentials: 'omit' }).then(function (resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.blob();
+          }).then(function (blob) {
+            var blobUrl = URL.createObjectURL(blob);
+            var s2 = document.createElement('script');
+            s2.src = blobUrl;
+            s2.onload = function () {
+              setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
+              resolve();
+            };
+            s2.onerror = function () {
+              URL.revokeObjectURL(blobUrl);
+              reject(new Error('Blob URL 也失败: ' + url));
+            };
+            document.head.appendChild(s2);
+          }).catch(function (e) {
+            reject(new Error('脚本加载失败 (script + fetch 双方案): ' + url + ' — ' + e.message));
+          });
+        }
+      };
+      document.head.appendChild(script);
+    });
+  }
+
+  function withTimeout(promise, ms, label) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () { reject(new Error(label + ' 超时 (' + ms + 'ms)')); }, ms);
+      promise.then(
+        function (v) { clearTimeout(timer); resolve(v); },
+        function (e) { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
+  /** 直接初始化 tesseract-core.asm.js + tessdata
+   *  完全不碰 Worker/WASM, 主线程调 Emscripten API
+   */
+  /** fetch 下载 — ReadableStream 分块读取 (ArkWeb 上 arrayBuffer() 对大文件有坑)
+   *  v1.13.10 验证: ReadableStream 能正常下到 100%, arrayBuffer() 会卡住
+   */
+  async function fetchWithProgress(url, label, onProgress, timeoutMs) {
+    timeoutMs = timeoutMs || 180000;
+    var resp = await withTimeout(fetch(url), timeoutMs, label + ' (fetch)');
+    if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
+    var total = parseInt(resp.headers.get('content-length'), 10) || 0;
+    var reader = resp.body.getReader();
+    var chunks = [];
+    var received = 0;
+    var lastTs = Date.now();
+    while (true) {
+      var chunk = await withTimeout(reader.read(), 30000, label + ' (read chunk)');
+      if (chunk.done) break;
+      chunks.push(chunk.value);
+      received += chunk.value.length;
+      lastTs = Date.now();
+      if (onProgress) {
+        var pct = total > 0 ? Math.round((received / total) * 100) : 50;
+        onProgress(label + ' 下载中...', pct);
+      }
+    }
+    // 合并 chunks
+    var result;
+    if (chunks.length === 0) {
+      result = new Uint8Array(0);
+    } else if (chunks.length === 1) {
+      result = chunks[0];
+    } else {
+      var totalLen = 0;
+      for (var i = 0; i < chunks.length; i++) totalLen += chunks[i].length;
+      result = new Uint8Array(totalLen);
+      var off = 0;
+      for (var i = 0; i < chunks.length; i++) { result.set(chunks[i], off); off += chunks[i].length; }
+    }
+    onProgress && onProgress(label + ' 下载完成', 100);
+    console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes');
+    return result;
+  }
+
+  async function initDirectOcr(onProgress) {
+    if (ocrModule) return ocrModule;
+
+    // 1. 加载 pako (46KB, 很快)
+    onProgress && onProgress('加载 pako 解压库...', 5);
+    if (typeof window.pako === 'undefined') {
+      await loadScript(pakoUrl);
+    }
+    if (!window.pako) throw new Error('pako 加载失败');
+
+    // 先查 IndexedDB 缓存, 没有再 fetch (jsdelivr CDN 优先, 同源 fallback 最后)
+    var t0 = Date.now();
+    var coreBytes;
+    var coreCacheKey = 'tesseract-core.asm.js@4.0.1';
+    var cached = await idbGet(coreCacheKey);
+    if (cached && cached instanceof Uint8Array && cached.length > 1000000) {
+      coreBytes = cached;
+      console.log('[DictImport] core asm.js 命中 IndexedDB 缓存:', coreBytes.length, 'bytes');
+      onProgress && onProgress('core asm.js 从本地缓存加载 ✓', 15);
+    } else {
+      // jsdelivr CDN 有国内节点 (0.9s 下完 5.4MB), GitHub Pages 在国内极慢/network error
+      var coreSrcList = [
+        { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.1/tesseract-core.asm.js', desc: 'jsdelivr CDN (国内最快)' },
+        { url: getOcrAssetUrl('tesseract-core.asm.js'), desc: '同源 fallback' },
+      ];
+      onProgress && onProgress('加载 tesseract-core.asm.js (5.4MB, jsdelivr CDN)...', 10);
+      var coreErr = null;
+      for (var ci = 0; ci < coreSrcList.length; ci++) {
+        try {
+          coreBytes = await fetchWithProgress(coreSrcList[ci].url, 'core asm.js (' + coreSrcList[ci].desc + ')', onProgress, 180000);
+          console.log('[DictImport] ✅ core asm.js 下载完成 (' + coreSrcList[ci].desc + '):', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
+          // idbPut 不 await, 后台存缓存
+          idbPut(coreCacheKey, coreBytes).then(function() {
+            console.log('[DictImport] core asm.js 已存入 IndexedDB 缓存');
+          }).catch(function(e) {
+            console.warn('[DictImport] core asm.js IDB 缓存失败:', e.message);
+          });
+          coreErr = null;
+          break;
+        } catch (e) {
+          console.warn('[DictImport] ❌ core asm.js 源失败 (' + coreSrcList[ci].desc + '):', e.message);
+          coreErr = e;
+        }
+      }
+      if (coreErr) throw new Error('tesseract-core.asm.js 所有源均失败, 最后错误: ' + coreErr.message + ' (建议检查网络或切换 WiFi)');
+    }
+
+    // Blob URL 注入 script —— tesseract-core.asm.js 是 IIFE, 执行完 Module 就 fully initialized
+    var blob = new Blob([coreBytes], { type: 'text/javascript' });
+    var blobUrl = URL.createObjectURL(blob);
+    await new Promise(function(resolve, reject) {
+      var s = document.createElement('script');
+      s.src = blobUrl;
+      s.onload = resolve;
+      s.onerror = function(){ reject(new Error('core asm.js Blob 注入失败')); };
+      document.head.appendChild(s);
+    });
+    setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 30000);
+    // ⚠️ tesseract-core.asm.js 的 window.TesseractCoreASM 是工厂函数不是 Module!
+    // 文件结构: var TesseractCoreASM = (function(){ return function(Module){...}; })();
+    // 必须调用一次才能拿到真正的 Module 对象
+    var factory = window.TesseractCoreASM;
+    if (typeof factory !== 'function') throw new Error('core asm.js 加载但 TesseractCoreASM 不是函数, 而是: ' + typeof factory);
+    console.log('[DictImport] TesseractCoreASM 是工厂函数, 调用...');
+    var Module = factory({}); // 传入空配置对象
+    // ⚠️ tesseract-core.asm.js 工厂内部把 UTF8ToString 等当全局用, 但只挂在 Module 上
+    // 必须手动提升到全局, 否则 GetUTF8Text() 内部调 UTF8ToString 会 ReferenceError
+    // 先探测 Module 上有没有这些函数, 有就提升; 没有就自己实现 UTF8ToString
+    if (typeof Module.UTF8ToString === 'function') window.UTF8ToString = Module.UTF8ToString;
+    if (typeof Module.UTF8ArrayToString === 'function') window.UTF8ArrayToString = Module.UTF8ArrayToString;
+    if (typeof Module.intArrayToString === 'function') window.intArrayToString = Module.intArrayToString;
+    if (typeof Module.stringToUTF8 === 'function') window.stringToUTF8 = Module.stringToUTF8;
+    if (typeof Module.allocateUTF8 === 'function') window.allocateUTF8 = Module.allocateUTF8;
+    // 兜底: 如果 Module.UTF8ToString 不存在, 自己实现一个从内存指针读 C 字符串
+    if (typeof window.UTF8ToString !== 'function') {
+      window.UTF8ToString = function(ptr) {
+        if (!ptr) return '';
+        var heap = Module.HEAPU8;
+        var end = ptr;
+        while (heap[end] !== 0) end++;
+        var bytes = heap.slice(ptr, end);
+        try {
+          return new TextDecoder('utf-8').decode(bytes);
+        } catch (e) {
+          // TextDecoder 不支持? 手动解码 ASCII fallback
+          var out = '';
+          for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+          return out;
+        }
+      };
+      console.warn('[DictImport] UTF8ToString 未从 Module 暴露, 使用自定义实现');
+    }
+    console.log('[DictImport] Module 初始化完成, keys 数量:', Object.keys(Module).length,
+      'UTF8ToString:', typeof window.UTF8ToString,
+      'TessBaseAPI:', typeof Module.TessBaseAPI);
+
+    // 4. 探测 FS API
+    var fsCreateDataFile = Module.FS_createDataFile ||
+      (Module.FS && Module.FS.createDataFile) ||
+      (typeof FS !== 'undefined' && FS.createDataFile);
+    if (!fsCreateDataFile) {
+      throw new Error('FS_createDataFile 不可用 (Module keys: ' + Object.keys(Module).filter(function(k){ return k.indexOf('FS')>=0 }).join(',') + ')');
+    }
+
+    // 5. 下载 tessdata — 先查 IndexedDB, 没有用 getTessdataUrl() 选最快的 CDN (jsdelivr 优先)
+    var tdBytes;
+    var tdCacheKey = 'eng.traineddata.gz@4.0.0';
+    var tdCached = await idbGet(tdCacheKey);
+    if (tdCached && tdCached instanceof Uint8Array && tdCached.length > 1000000) {
+      tdBytes = tdCached;
+      console.log('[DictImport] tessdata 命中 IndexedDB 缓存:', tdBytes.length, 'bytes');
+      onProgress && onProgress('tessdata 从本地缓存加载 ✓', 85);
+    } else {
+      onProgress && onProgress('下载 tessdata (11MB)...', 70);
+      var tdBase = await getTessdataUrl();
+      var tdUrl = tdBase + '/eng.traineddata.gz';
+      console.log('[DictImport] tessdata 下载地址:', tdUrl);
+      tdBytes = await fetchWithProgress(tdUrl, 'tessdata', onProgress, 180000);
+      // idbPut 不 await, 后台存缓存, 不阻塞主流程
+      idbPut(tdCacheKey, tdBytes).then(function() {
+        console.log('[DictImport] tessdata 已存入 IndexedDB 缓存');
+      }).catch(function(e) {
+        console.warn('[DictImport] tessdata IDB 缓存失败:', e.message);
+      });
+    }
+    console.log('[DictImport] 开始解压 tessdata...');
+    onProgress && onProgress('解压 tessdata...', 95);
+    var tdData = pako.ungzip(tdBytes);
+    console.log('[DictImport] tessdata 解压完成:', tdData.length, 'bytes');
+
+    // 6. 写入 MEMFS
+    console.log('[DictImport] 写入 MEMFS...');
+    try {
+      fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
+      console.log('[DictImport] MEMFS 写入成功');
+    } catch (e) {
+      throw new Error('写入 MEMFS 失败: ' + e.message);
+    }
+
+    // 7. TessBaseAPI.Init
+    console.log('[DictImport] TessBaseAPI.Init...');
+    onProgress && onProgress('初始化 TessBaseAPI (LSTM+Legacy)...', 98);
+    var api = new Module.TessBaseAPI();
+    var initResult = api.Init('/', 'eng', 1); // OEM=1
+    if (initResult !== 0) throw new Error('TessBaseAPI.Init 失败, 返回值=' + initResult);
+
+    onProgress && onProgress('OCR 引擎就绪 🎉', 100);
+    console.log('[DictImport] ✅ OCR 引擎初始化完成, 累计耗时', Math.round((Date.now()-t0)/1000) + 's');
+    ocrModule = { api: api, Module: Module };
+    return ocrModule;
+  }
+
+  /** OCR 单张页面图片 (主线程 direct, 零 Worker/WASM 依赖) */
+  async function ocrImage(file, onProgress) {
+    if (!ocrModule) {
+      if (ocrInitError) throw ocrInitError;
+      try {
+        await initDirectOcr(onProgress);
+      } catch (e) { ocrInitError = e; throw e; }
+    }
+
+    onProgress && onProgress('准备图片...', 0);
+    var canvas = await fileToCanvas(file);
+    preprocessImage(canvas);
+
+    var ctx = canvas.getContext('2d');
+    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var api = ocrModule.api;
+    var Module = ocrModule.Module;
+
+    // 策略1: PSM 6 (统一文本块)
+    var text = '';
+    try {
+      api.SetVariable('tessedit_pageseg_mode', '6');
+      api.SetImage(imgData.data, canvas.width, canvas.height, 4, canvas.width * 4);
+      onProgress && onProgress('识别中 (PSM6)...', 0);
+      api.Recognize(null);
+      var resultPtr = api.GetUTF8Text();
+      text = UTF8ToString(resultPtr).trim();
+      Module._free(resultPtr);
+    } catch (e) {
+      console.warn('[DictImport][recognize PSM6] 失败:', e.message);
+    }
+
+    // 策略2: PSM 11 稀疏文本 (PSM6 结果太短时)
+    if (text.length < 30) {
+      try {
+        api.SetVariable('tessedit_pageseg_mode', '11');
+        api.SetImage(imgData.data, canvas.width, canvas.height, 4, canvas.width * 4);
+        onProgress && onProgress('识别中 (PSM11)...', 0);
+        api.Recognize(null);
+        var r2 = api.GetUTF8Text();
+        var t2 = UTF8ToString(r2).trim();
+        Module._free(r2);
+        if (t2.length > text.length) text = t2;
+      } catch (e2) {
+        console.warn('[DictImport][recognize PSM11] 失败:', e2.message);
+      }
+    }
+
+    return text;
+  }
+
+  /** 批次结束释放内存 */
+  async function closeOcrWorker() {
+    if (ocrModule) {
+      try { ocrModule.api.End(); } catch (e) {}
+      try {
+        // Emscripten 绑定的 TessBaseAPI 实例没有 .delete(), 用 _tesseract_delete_instance 或直接置空
+        // 这里简单置空, 让 GC 回收
+      } catch (e) {}
+      ocrModule = null;
+      ocrInitError = null;
+    }
+  }
+
+  /** File → Canvas (等比缩放, 手机大图安全) */
+  function fileToCanvas(file, maxEdge) {
+    maxEdge = maxEdge || 2400;
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('图片读取失败')); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('图片解码失败')); };
+        img.onload = function () {
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = Math.min(1, maxEdge / Math.max(w, h));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale);
+          canvas.height = Math.round(h * scale);
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** 图像预处理: 灰度化 + 对比度增强 + 二值化 (提升词典印刷体识别率) */
+  function preprocessImage(canvas) {
+    var w = canvas.width, h = canvas.height;
+    var ctx = canvas.getContext('2d');
+    var imageData = ctx.getImageData(0, 0, w, h);
+    var data = imageData.data;
+    var gray = new Uint8ClampedArray(w * h);
+    var sum = 0;
+    for (var i = 0, j = 0; i < data.length; i += 4, j++) {
+      gray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+      sum += gray[j];
+    }
+    var avg = sum / gray.length;
+    var contrast = 1.8;
+    var out = ctx.createImageData(w, h);
+    var outData = out.data;
+    var threshold = avg * 0.7;
+    for (var n = 0; n < gray.length; n++) {
+      var val = gray[n] > threshold ? 255 : 0;
+      outData[n * 4] = val; outData[n * 4 + 1] = val; outData[n * 4 + 2] = val; outData[n * 4 + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+    return canvas;
+  }
+
+  /** OCR 环境诊断 —— 手机上无法看 console 时救命用
+   *  覆盖整条链路: UA → JS 运行时 → pako → tesseract-core.asm.js → tessdata → MEMFS → TessBaseAPI → recognize
+   *  完全不碰 Worker/WASM, 因为 ArkWeb 对这俩有坑
+   *  每一步都打印 ✅/❌ + 详细原因, 最后一键复制结果
+   */
+  async function runDiagnostics() {
+    var panel = document.getElementById('diagPanel');
+    panel.style.display = 'block';
+    var logs = [];
+    var VER = (window.App && window.App.VERSION) || 'unknown';
+    var EXPECTED_VER = '1.13.12';
+    function log(icon, msg, detail) {
+      var line = icon + ' ' + msg;
+      if (detail !== undefined) line += '\n  └─ ' + detail;
+      logs.push(line);
+      panel.textContent = logs.join('\n') + '\n\n⏳ 正在检测...';
+      console.log('[DictImport][DIAG]', line);
+    }
+    log('🏷️', 'APP_VERSION', VER + ' (词典导入模块)' + (VER === EXPECTED_VER ? ' ✅' : ' ⚠️ 不是最新版, 请强制刷新 (Ctrl+Shift+R)'));
+
+    // 1. UA / 浏览器
+    log('📱', 'UserAgent', navigator.userAgent.slice(0, 140));
+    var ua = navigator.userAgent;
+    var browser = 'Unknown';
+    if (/HarmonyOS|ArkWeb/.test(ua)) browser = 'HarmonyOS (ArkWeb) — 已知 Worker/WASM 有坑';
+    else if (/iPhone|iPad/.test(ua)) browser = 'iOS Safari';
+    else if (/Android/.test(ua) && /Chrome/.test(ua)) browser = 'Android Chrome';
+    else if (/Edg/.test(ua)) browser = 'Edge';
+    else if (/Chrome/.test(ua)) browser = 'Chrome';
+    else if (/Safari/.test(ua)) browser = 'Safari';
+    log('🌐', '识别为', browser);
+
+    // 2. Canvas 2D (OCR 必须)
+    var testCanvas = document.createElement('canvas');
+    if (!testCanvas.getContext || !testCanvas.getContext('2d')) {
+      log('❌', 'Canvas 2D 不可用!', 'OCR 需要 Canvas API 处理图片');
+      showDiagResult(logs);
+      return;
+    }
+    log('✅', 'Canvas 2D 可用');
+
+    // 3. ES6 Promise + async (所有现代浏览器都支持, 但还是确认一下)
+    try {
+      await Promise.resolve(1);
+      log('✅', 'Promise/async 可用');
+    } catch (e) {
+      log('❌', 'Promise/async 异常', e.message);
+    }
+
+    // 4. pako 脚本可达性
+    log('⏳', '检测 pako 可达性...');
+    try {
+      var pakoHead = await fetch(pakoUrl, { method: 'HEAD' });
+      log(pakoHead.ok ? '✅' : '❌', 'pako ' + pakoUrl.slice(pakoUrl.indexOf('cdn.jsdelivr')), pakoHead.ok ? '可达' : ('HTTP ' + pakoHead.status));
+    } catch (e) {
+      log('❌', 'pako 可达性', '网络错误: ' + e.message);
+    }
+
+    // 5. tesseract-core.asm.js 可达性 (**这是我们真正用的, 5.6MB 纯 JS, 不碰 WASM/Worker**)
+    log('⏳', '检测 tesseract-core.asm.js 可达性 (5.6MB 纯 JS 方案)...');
+    try {
+      var coreHead = await fetch(coreAsmUrl, { method: 'HEAD' });
+      if (coreHead.ok) {
+        var size = coreHead.headers.get('content-length') || '?';
+        log('✅', 'tesseract-core.asm.js', '可达, size=' + size + ' bytes');
+      } else {
+        log('❌', 'tesseract-core.asm.js', 'HTTP ' + coreHead.status);
+      }
+    } catch (e) {
+      log('❌', 'tesseract-core.asm.js', '网络错误: ' + e.message);
+    }
+
+    // 6. tessdata 可达性
+    var tessdataCandidates = [
+      { url: './tessdata', desc: '本地' },
+      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'CDN镜像(jsdelivr)' },
+      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方源(projectnaptha)' }
+    ];
+    var reachableLangPath = null;
+    for (var ti = 0; ti < tessdataCandidates.length; ti++) {
+      var tc = tessdataCandidates[ti];
+      try {
+        var resp = await fetch(tc.url + '/eng.traineddata.gz', { method: 'HEAD' });
+        if (resp.ok) { log('✅', 'tessdata ' + tc.desc, tc.url); reachableLangPath = tc.url; break; }
+        else log('❌', 'tessdata ' + tc.desc, 'HTTP ' + resp.status);
+      } catch (e) {
+        log('❌', 'tessdata ' + tc.desc, '网络错误: ' + e.message);
+      }
+    }
+    if (!reachableLangPath) {
+      log('❌', '所有 tessdata 源均不可达', 'OCR 无法加载语言包, 请检查网络');
+      showDiagResult(logs);
+      return;
+    }
+
+    // 7. DIRECT OCR PIPELINE 测试 —— 核心! 不走 tesseract.js createWorker
+    log('⏳', '加载 pako + tesseract-core.asm.js (超时 75s)...');
+    var t0 = Date.now();
+    try {
+      // 先重置状态
+      ocrModule = null;
+      ocrInitError = null;
+      // 清掉之前可能残留的 Tesseract 全局变量, 避免干扰
+      if (window.TesseractCoreASM) {
+        // 无法真正卸载 Emscripten Module, 刷新整个 runtime 不现实
+        // 直接跳过已加载的情况
+        log('⚠️', 'tesseract-core.asm.js 已在内存中', '跳过重复加载');
+      }
+      var mod = await initDirectOcr(function(label, p) {
+        // 进度值统一约定: 0-100 整数 (initDirectOcr 和 fetchWithProgress 都这么传)
+        // 如果传了 0-1 小数 (旧代码残留), 自动乘 100 兼容
+        var pct = (p || 0) <= 1 && (p || 0) > 0 ? Math.round((p || 0) * 100) : Math.round(p || 0);
+        panel.textContent = logs.join('\n') + '\n\n⏳ ' + label + ' (' + pct + '%)';
+      });
+      log('✅', 'tesseract-core.asm.js 初始化成功', '耗时 ' + (Date.now() - t0) + 'ms · TessBaseAPI=' + typeof mod.api);
+    } catch (e) {
+      log('❌', 'tesseract-core.asm.js 初始化失败', e.message);
+      if (e.message && e.message.indexOf('超时') >= 0) {
+        log('', '诊断提示', '网络可能较慢, 建议在 WiFi 下重试; 4G/5G 首次加载 5.6MB 可能需要 10-30s');
+      }
+      showDiagResult(logs);
+      return;
+    }
+
+    // 8. 极简 recognize 测试 —— 画 "Hello World" 到 canvas 直接调 TessBaseAPI
+    log('⏳', '极简 recognize 测试 (direct TessBaseAPI)...');
+    var diagText = 'Hello World';
+    var diagCanvas = document.createElement('canvas');
+    diagCanvas.width = 300; diagCanvas.height = 80;
+    var dc = diagCanvas.getContext('2d');
+    dc.fillStyle = '#ffffff'; dc.fillRect(0, 0, 300, 80);
+    dc.fillStyle = '#000000';
+    dc.font = 'bold 36px sans-serif';
+    dc.fillText(diagText, 20, 55);
+    try {
+      var api = ocrModule.api;
+      var Module = ocrModule.Module;
+      var imgData = dc.getImageData(0, 0, 300, 80);
+      api.SetVariable('tessedit_pageseg_mode', '6');
+      api.SetImage(imgData.data, 300, 80, 4, 300 * 4);
+      var t1 = Date.now();
+      api.Recognize(null);
+      var resultPtr = api.GetUTF8Text();
+      var recognized = UTF8ToString(resultPtr).trim();
+      Module._free(resultPtr);
+      log(recognized ? '✅' : '⚠️', 'recognize (direct)',
+        recognized ? ('成功! 返回: "' + recognized + '" (' + (Date.now() - t1) + 'ms)') : '返回空文本');
+    } catch (e) {
+      log('❌', 'recognize (direct)', e.message);
+      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+    }
+
+    // 清理
+    try { closeOcrWorker(); } catch (_) {}
+
+    showDiagResult(logs);
+  }
+
+  function showDiagResult(logs) {
+    var panel = document.getElementById('diagPanel');
+    panel.textContent = logs.join('\n');
+    panel.innerHTML += '\n\n' +
+      '<button id="diagCopy" style="margin-top:10px;padding:8px 14px;background:#4A90D9;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;">📋 复制诊断结果发给开发者</button>' +
+      '<button id="diagClose" style="margin-top:10px;margin-left:8px;padding:8px 14px;background:#e9ecef;color:#333;border:none;border-radius:6px;font-size:12px;cursor:pointer;">关闭</button>';
+    var copyBtn = document.getElementById('diagCopy');
+    var closeBtn = document.getElementById('diagClose');
+    if (copyBtn) copyBtn.onclick = function () {
+      navigator.clipboard.writeText(logs.join('\n')).then(function () {
+        copyBtn.textContent = '✅ 已复制';
+      }).catch(function () {
+        var ta = document.createElement('textarea');
+        ta.value = logs.join('\n'); document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); copyBtn.textContent = '✅ 已复制'; } catch (e) { copyBtn.textContent = '❌ 复制失败, 请手动长按选中'; }
+        document.body.removeChild(ta);
+      });
+    };
+    if (closeBtn) closeBtn.onclick = function () { panel.style.display = 'none'; };
+  }
+
+  // ========== HTML 模板 ==========
+  function containerHtml() {
+    return (
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
+        '<h3 style="margin:0;">词典导入</h3>' +
+        '<button class="btn btn-outline btn-sm" id="btnShowHistory">历史批次</button>' +
+      '</div>' +
+      '<div id="dictImportContainer"></div>'
+    );
+  }
+
+  // ========== 入口 ==========
   function init() {
+    var adminContainer = document.getElementById('adminTabContent');
+    if (!adminContainer) return;
+    adminContainer.innerHTML = containerHtml();
+    var historyBtn = document.getElementById('btnShowHistory');
+    if (historyBtn) historyBtn.addEventListener('click', showHistory);
     showUpload();
   }
 
+  // ========== Step 1: 上传 ==========
   function showUpload() {
     var container = document.getElementById('dictImportContainer');
-    if (!container) return;
     container.innerHTML = (
-      '<div style="max-width:600px;margin:0 auto;">' +
-        '<div style="text-align:center;margin-bottom:24px;">' +
-          '<div style="font-size:48px;margin-bottom:12px;">📖</div>' +
-          '<h3>词典导入</h3>' +
-          '<p style="color:var(--color-text-light);font-size:13px;margin-top:8px;">拍照词典页面, AI 自动识别并提取词条</p>' +
-          '<div style="margin-top:8px;font-size:11px;color:var(--color-muted);">v' + ((window.App && window.App.VERSION) || '?') + ' · AI 视觉解析</div>' +
+      '<div class="dict-upload">' +
+        '<div class="dict-upload-hint">' +
+          '<p style="margin:0 0 8px;font-weight:600;">上传词典页面照片</p>' +
+          '<p style="margin:0;color:var(--color-text-light);font-size:13px;line-height:1.6;">' +
+            '支持拍照或从相册选择, 一次最多 ' + MAX_PAGES + ' 张。<br>' +
+            '请确保页面完整清晰, 页码在页眉/页脚可见, 方便系统自动识别。' +
+          '</p>' +
         '</div>' +
-        '<div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:20px;">' +
-          '<button class="btn btn-primary" id="btnCamera">📷 拍照</button>' +
-          '<button class="btn btn-outline" id="btnAlbum">🖼 相册选择</button>' +
-          '<button class="btn btn-outline" id="btnHistory">📋 历史批次</button>' +
+        '<div style="display:flex;gap:12px;margin:16px 0;flex-wrap:wrap;">' +
+          '<button class="btn btn-primary" id="btnCamera" style="flex:1;min-width:180px;">📷 拍照上传</button>' +
+          '<button class="btn btn-outline" id="btnAlbum" style="flex:1;min-width:180px;">🖼 从相册选择</button>' +
         '</div>' +
+        '<div style="margin-bottom:12px;">' +
+          '<button class="btn btn-outline btn-sm" id="btnDiag" style="width:100%;">🔧 OCR 环境诊断（如果识别失败先点这个）</button>' +
+        '</div>' +
+        '<div id="diagPanel" style="display:none;background:#f8f9fa;border-radius:8px;padding:12px 14px;font-family:monospace;font-size:12px;max-height:50vh;overflow-y:auto;border:1px solid #eee;"></div>' +
         '<input type="file" id="fileCamera" accept="image/*" capture="environment" multiple style="display:none;">' +
         '<input type="file" id="fileAlbum" accept="image/*" multiple style="display:none;">' +
         '<div id="previewArea" style="display:none;margin-top:16px;"></div>' +
         '<div id="dictImportActions" style="display:none;gap:12px;margin-top:20px;">' +
           '<button class="btn btn-danger btn-sm" id="btnReset">重新选择</button>' +
-          '<button class="btn btn-primary" id="btnStartParse">开始 AI 识别 →</button>' +
+          '<button class="btn btn-primary" id="btnStartParse">开始识别解析 →</button>' +
         '</div>' +
       '</div>'
     );
@@ -64,7 +718,7 @@ App.DictImport = (function () {
     document.getElementById('fileAlbum').addEventListener('change', onFileSelected);
     document.getElementById('btnReset').addEventListener('click', showUpload);
     document.getElementById('btnStartParse').addEventListener('click', startParse);
-    document.getElementById('btnHistory').addEventListener('click', showHistory);
+    document.getElementById('btnDiag').addEventListener('click', runDiagnostics);
   }
 
   var selectedFiles = [];
@@ -73,6 +727,7 @@ App.DictImport = (function () {
     var files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
+    // 最多 10 张
     selectedFiles = files.slice(0, MAX_PAGES);
     if (files.length > MAX_PAGES) {
       App.showToast('已自动截取前 ' + MAX_PAGES + ' 张, 多余的被忽略', 'info');
@@ -89,7 +744,7 @@ App.DictImport = (function () {
 
     area.innerHTML = (
       '<div style="font-size:13px;color:var(--color-text-light);margin-bottom:8px;">' +
-        '已选 ' + selectedFiles.length + ' 张, 点击"开始 AI 识别"进行解析' +
+        '已选 ' + selectedFiles.length + ' 张, 点击"开始识别解析"进行 OCR 和结构化处理' +
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
         selectedFiles.map(function (f, i) {
@@ -105,13 +760,12 @@ App.DictImport = (function () {
     );
   }
 
-  // ========== Step 2: AI 视觉解析 ==========
-
+  // ========== Step 2: OCR + 解析 ==========
   async function startParse() {
     var container = document.getElementById('dictImportContainer');
     container.innerHTML = (
       '<div style="text-align:center;padding:40px 20px;">' +
-        '<div style="font-size:16px;font-weight:600;margin-bottom:12px;">正在 AI 识别词典页面...</div>' +
+        '<div style="font-size:16px;font-weight:600;margin-bottom:12px;">正在识别词典页面...</div>' +
         '<div id="parseProgress" style="color:var(--color-text-light);font-size:13px;">准备中...</div>' +
         '<div id="parseBar" style="width:100%;max-width:400px;height:6px;background:var(--color-border);border-radius:3px;margin:16px auto 0;overflow:hidden;">' +
           '<div id="parseBarFill" style="height:100%;background:var(--color-primary);border-radius:3px;width:0%;transition:width 0.3s;"></div>' +
@@ -123,106 +777,85 @@ App.DictImport = (function () {
       // 创建批次
       var importRec = await App.DB.dictCreateImport('camera');
 
+      var pages = [];
       var allEntries = [];
       var pageNumbers = [];
       var totalWords = 0;
       var totalPhrases = 0;
       var startTime = Date.now();
 
-      // 把图片转成 base64 数组
-      var progress = document.getElementById('parseProgress');
-      var barFill = document.getElementById('parseBarFill');
-
-      progress.textContent = '正在转换图片...';
-      var imagesBase64 = [];
       for (var i = 0; i < selectedFiles.length; i++) {
-        var b64 = await fileToBase64(selectedFiles[i]);
-        imagesBase64.push({ data: b64, mimeType: selectedFiles[i].type || 'image/jpeg' });
-      }
+        var file = selectedFiles[i];
+        var progress = document.getElementById('parseProgress');
+        var barFill = document.getElementById('parseBarFill');
+        progress.textContent = '准备识别第 ' + (i + 1) + ' / ' + selectedFiles.length + ' 张...';
+        if (barFill) barFill.style.width = ((i / selectedFiles.length) * 100) + '%';
 
-      // 调 Edge Function (一次性发送所有图片, 减少请求次数)
-      progress.textContent = '正在调用 AI 识别 (' + selectedFiles.length + ' 张)...';
-      if (barFill) barFill.style.width = '20%';
+        var onOcrProgress = (function (idx, total) {
+          return function (label, p) {
+            // p 是 0-100 整数 (统一约定)
+            var pInt = Math.min(100, Math.max(0, Math.round(p || 0)));
+            progress.textContent = '第 ' + (idx + 1) + ' / ' + total + ' 张 · ' + (label || '处理中') + ' ' + pInt + '%';
+            // 进度条: (已完成张数/total + 当前张的进度/100/total) * 100 = idx*100/total + pInt/total
+            var barPct = Math.min(100, Math.round(((idx / total) + (pInt / 100 / total)) * 100));
+            if (barFill) barFill.style.width = barPct + '%';
+          };
+        })(i, selectedFiles.length);
 
-      var token = localStorage.getItem('beidanci_access_token') || '';
-      var resp = await fetch(App.Config.EDGE_FUNCTIONS.DICT_OCR_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token,
-        },
-        body: JSON.stringify({ images: imagesBase64 }),
-      });
+        // OCR
+        var ocrStart = Date.now();
+        var ocrText = await ocrImage(file, onOcrProgress);
+        var ocrDur = Date.now() - ocrStart;
 
-      if (!resp.ok) {
-        var errBody = await resp.json().catch(function() { return { error: 'HTTP ' + resp.status }; });
-        throw new Error(errBody.error || 'AI 识别请求失败 (HTTP ' + resp.status + ')');
-      }
-
-      var result = await resp.json();
-      var pages = result.pages || [];
-
-      if (barFill) barFill.style.width = '70%';
-
-      // 处理每页解析结果
-      for (var pi = 0; pi < pages.length; pi++) {
-        var pageData = pages[pi];
-        var pageNumber = pageData.pageNumber || (pi + 1);
-        var words = pageData.words || [];
-        var phrases = pageData.phrases || [];
-
-        totalWords += words.length;
-        totalPhrases += (phrases ? phrases.length : 0);
-        pageNumbers.push(pageNumber);
+        // 解析
+        var parsed = parseDictionaryPage(ocrText);
+        totalWords += parsed.words.length;
+        totalPhrases += parsed.phrases.length;
+        pageNumbers.push(parsed.pageNumber);
 
         // 创建 page 行
         var pageRow = await App.DB.dictAddPages(importRec.id, [{
-          page_number: pageNumber,
-          ocr_raw_text: JSON.stringify(pageData, null, 2),
-          first_headword: words[0] ? words[0].word : null,
-          last_headword: words[words.length - 1] ? words[words.length - 1].word : null,
-          parse_duration_ms: 0,
+          page_number: parsed.pageNumber || (i + 1),
+          ocr_raw_text: ocrText,
+          first_headword: parsed.words[0] ? parsed.words[0].word : null,
+          last_headword: parsed.words[parsed.words.length - 1] ? parsed.words[parsed.words.length - 1].word : null,
+          parse_duration_ms: ocrDur,
         }]);
         var pageId = pageRow[0] ? pageRow[0].id : (pageRow.id || null);
+        pages.push({ number: parsed.pageNumber, entries: parsed.words.length + parsed.phrases.length });
 
-        // 收集 word entries
-        words.forEach(function (w, ri) {
+        // 收集 entries
+        parsed.words.forEach(function (w, ri) {
           allEntries.push({
             page_id: pageId,
             import_id: importRec.id,
             entry_type: 'word',
             word: w.word,
-            phonetic: w.phonetic || null,
-            part_of_speech: w.pos || null,
-            meanings: w.meanings || [],
-            derivatives: w.derivatives || [],
-            phrases: w.phrases || [],
-            special_examples: w.examples || [],
+            phonetic: w.phonetic,
+            part_of_speech: w.pos,
+            meanings: w.meanings,
+            derivatives: w.derivatives,
+            phrases: w.phrases,
+            special_examples: w.special_examples,
             row_order: ri * 2,
           });
         });
-
-        // 收集 phrase entries
-        if (phrases && phrases.length > 0) {
-          phrases.forEach(function (p, idx) {
-            allEntries.push({
-              page_id: pageId,
-              import_id: importRec.id,
-              entry_type: 'phrase',
-              word: p.phrase || p.word || '',
-              phonetic: null,
-              part_of_speech: p.pos || null,
-              meanings: p.meanings || [],
-              derivatives: [],
-              phrases: [],
-              special_examples: [],
-              row_order: words.length * 2 + idx * 2 + 1,
-            });
+        parsed.phrases.forEach(function (p, pi) {
+          allEntries.push({
+            page_id: pageId,
+            import_id: importRec.id,
+            entry_type: 'phrase',
+            word: p.phrase,
+            phonetic: null,
+            part_of_speech: p.pos,
+            meanings: p.meanings,
+            derivatives: [],
+            phrases: [],
+            special_examples: [],
+            row_order: parsed.words.length * 2 + pi * 2 + 1,
           });
-        }
+        });
       }
-
-      if (barFill) barFill.style.width = '90%';
 
       // 写入 entries (分批)
       if (allEntries.length > 0) {
@@ -236,7 +869,7 @@ App.DictImport = (function () {
       pageNumbers.sort(function (a, b) { return a - b; });
       var summary = {
         total_ms: Date.now() - startTime,
-        pages: pages.length,
+        pages: selectedFiles.length,
         words: totalWords,
         phrases: totalPhrases,
         page_numbers: pageNumbers,
@@ -246,7 +879,7 @@ App.DictImport = (function () {
       progress.textContent = '完成!';
       if (barFill) barFill.style.width = '100%';
 
-      // 自动 accepted (审核环节在详情页可手动调整)
+      // 跳过审核直接进入总结页 (v1.12: 自动 accepted, 审核环节可在历史批次中手动调整)
       await App.DB.api('PATCH', 'dictionary_entries',
         { review_status: 'accepted' },
         'import_id=eq.' + encodeURIComponent(importRec.id));
@@ -254,16 +887,23 @@ App.DictImport = (function () {
       showSummary(importRec.id, summary);
 
     } catch (e) {
-      console.error('[DictImport] AI 识别失败', e);
+      console.error('[DictImport] 解析失败', e);
       container.innerHTML = (
         '<div style="text-align:center;padding:40px 20px;">' +
           '<div style="font-size:16px;font-weight:600;margin-bottom:12px;color:var(--color-danger);">识别失败</div>' +
-          '<div style="color:var(--color-text-light);font-size:13px;margin-bottom:20px;line-height:1.6;max-width:400px;margin:0 auto 20px;">' + App.Utils.escapeHtml(e.message) + '</div>' +
+          '<div style="color:var(--color-text-light);font-size:13px;margin-bottom:20px;line-height:1.6;">' + App.Utils.escapeHtml(e.message) + '</div>' +
+          '<div style="color:var(--color-muted);font-size:12px;margin-bottom:16px;">' +
+            (navigator.userAgent && /Mobile|Android|iPhone|iPad/.test(navigator.userAgent)
+              ? '提示: 手机端建议使用较新的 Chrome/Safari 浏览器, 确保相册图片清晰且光线充足'
+              : '提示: 请确认词典图片清晰且光线充足') +
+          '</div>' +
           '<button class="btn btn-primary" onclick="App.DictImport.retry()">重试</button>' +
         '</div>'
       );
       window._dictRetry = showUpload;
       App.showToast('识别失败: ' + e.message, 'error', 5000);
+    } finally {
+      await closeOcrWorker();
     }
   }
 
@@ -271,25 +911,223 @@ App.DictImport = (function () {
     if (window._dictRetry) { window._dictRetry(); window._dictRetry = null; }
   }
 
-  /** 图片文件转 base64 (去掉 data:xxx;base64, 前缀) */
-  function fileToBase64(file) {
-    return new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function () {
-        var result = reader.result;
-        var comma = result.indexOf(',');
-        resolve(comma >= 0 ? result.substring(comma + 1) : result);
-      };
-      reader.onerror = function () { reject(new Error('图片读取失败')); };
-      reader.readAsDataURL(file);
-    });
+  // ========== Step 2b: 词典解析 (排版规则) ==========
+  /**
+   * 从 OCR 原始文本解析词典结构
+   * 返回 { pageNumber, words:[{word, phonetic, pos, meanings, derivatives, phrases, special_examples}], phrases:[...] }
+   *
+   * 排版识别规则 (基于样例图):
+   *   - 页眉: 页码数字在右上角 + 当前 header word (蓝色条)
+   *   - Headword 标记: ● ⊕ ▶ ■ ⊖ + 加粗词 + /phonetic/ + pos
+   *   - 义项: ①②③④⑤ 圆圈编号 + 英文释义 + 中文翻译 + 例句
+   *   - 派生词: ▶ 前缀 + 新词 /phonetic/ pos
+   *   - 词组: 缩进的短语 + 释义 (在义项内)
+   *   - 例句: 英文完整句 + 破折号或换行 + 中文翻译
+   */
+  function parseDictionaryPage(ocrText) {
+    var words = [];
+    var phrases = [];
+
+    if (!ocrText || ocrText.trim().length < 5) {
+      return { pageNumber: null, words: words, phrases: phrases };
+    }
+
+    var lines = ocrText.split(/\r?\n/);
+
+    // 1. 识别页码: 页眉区域的小数字 (词典页码通常 1-300, 独立一行或紧挨 header word)
+    var pageNumber = extractPageNumber(lines);
+
+    // 2. 检测 headword 行的起始标记
+    //    词典 headword 通常以 ● ⊕ ▶ ■ ⊖ 开头, 或行首是粗体英文词后跟 /phonetic/
+    var headwordPatterns = [
+      /^[●⊕▶■⊖\u25cf\u25a0\u25b6\u25c6\u2726\u2766\u00b7]\s*([a-zA-Z][a-zA-Z\-']*)\s*\/([^\/]+)\//,  // 符号 + word + /phonetic/
+      /^[a-zA-Z][a-zA-Z\-']*\s*\/([^\/]+)\//,                                                    // 纯 word + /phonetic/
+    ];
+    var posPattern = /\s+(n|v|vt|vi|adj|adv|prep|art|conj|pron|num|int|aux|det|prep\.|pron\.|adj\.|adv\.|n\.|v\.|vt\.|vi\.|int\.|conj\.|prep\.|art\.|det\.|aux\.|num\.)\b/i;
+    var meaningMarker = /^[①②③④⑤⑥⑦⑧⑨⑩\u2460-\u24ff]/;  // 圆圈数字
+    var derivativeMarker = /^▶|^►|^⊕/;
+    var phrasePattern = /(?:^|\s)(be |in |at |on |by |for |to |from |with |of |up |down |out |off|over |under |about |after |before |above |below )[a-zA-Z]/i;
+
+    var currentWord = null;
+    var currentPhrase = null;
+    var currentMeaning = null;
+    var buffer = [];
+
+    function flushCurrentWord() {
+      if (currentWord) {
+        // 合并 buffered lines
+        currentWord.meaning = currentWord.meaning || '';
+        if (buffer.length > 0) {
+          currentWord.meaning += '\n' + buffer.join(' ');
+          buffer = [];
+        }
+        if (currentMeaning) {
+          if (buffer.length > 0) {
+            currentMeaning.zh_def += '\n' + buffer.join(' ');
+            buffer = [];
+          }
+        }
+        words.push(currentWord);
+        currentWord = null;
+        currentPhrase = null;
+        currentMeaning = null;
+      }
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line) continue;
+
+      // 跳过页眉页码行 (纯数字短行)
+      if (/^\d{1,3}$/.test(line) && currentWord === null) continue;
+      // 跳过 ABC 字母索引大标题
+      if (/^[A-Za-z]{1,3}\s*$/.test(line) && line.length <= 3) continue;
+      // 跳过高考链接/辨/注/同族词等蓝色块标题
+      if (/高考链接|同族词|辨|注/.test(line) && line.length < 15) continue;
+
+      // 检测 headword 行
+      var headwordMatch = null;
+      for (var pi = 0; pi < headwordPatterns.length; pi++) {
+        headwordMatch = line.match(headwordPatterns[pi]);
+        if (headwordMatch) break;
+      }
+
+      if (headwordMatch) {
+        // 新 headword — 先 flush 上一个
+        flushCurrentWord();
+
+        var wordText = headwordMatch[1];
+        var phonetic = headwordMatch[2] || '';
+        // 提取 pos
+        var posMatch = line.match(posPattern);
+        var pos = posMatch ? posMatch[1].replace(/\.$/, '').toLowerCase() : '';
+
+        currentWord = {
+          word: wordText.toLowerCase(),
+          phonetic: phonetic.trim(),
+          pos: pos,
+          meanings: [],
+          derivatives: [],
+          phrases: [],
+          special_examples: [],
+        };
+        continue;
+      }
+
+      // 如果还没进入任何 headword, 跳过
+      if (!currentWord) continue;
+
+      // 检测派生词 ▶
+      if (derivativeMarker.test(line)) {
+        flushCurrentWord();
+        // 派生词条目, 作为独立 headword
+        var derivMatch = line.replace(derivativeMarker, '').trim();
+        var derivWord = derivMatch.match(/^([a-zA-Z][a-zA-Z\-']*)\s*\/([^\/]+)\//);
+        if (derivWord) {
+          currentWord = {
+            word: derivWord[1].toLowerCase(),
+            phonetic: derivWord[2].trim(),
+            pos: '',
+            meanings: [],
+            derivatives: [],
+            phrases: [],
+            special_examples: [],
+          };
+        } else {
+          currentWord = { word: derivMatch.toLowerCase(), phonetic: '', pos: '', meanings: [], derivatives: [], phrases: [], special_examples: [] };
+        }
+        continue;
+      }
+
+      // 检测义项编号 ①②③...
+      if (meaningMarker.test(line)) {
+        // 保存上一个义项
+        if (currentMeaning) {
+          if (buffer.length > 0) {
+            currentMeaning.zh_def += '\n' + buffer.join(' ');
+            buffer = [];
+          }
+          currentWord.meanings.push(currentMeaning);
+        }
+        var cleanLine = line.replace(meaningMarker, '').trim();
+        // 尝试拆分成 "英文释义 + 中文释义" — 破折号或冒号分隔
+        var parts = splitEnZh(cleanLine);
+        currentMeaning = {
+          idx: currentWord.meanings.length + 1,
+          en_def: parts.en,
+          zh_def: parts.zh || '',
+          examples: [],
+        };
+        buffer = [];
+
+        // 如果同一行里有例句 (英文完整句 + 中文)
+        var exMatch = cleanLine.match(/([A-Z][^.?!]{10,}[.?!])\s+([^A-Z].{5,})/);
+        if (exMatch && currentMeaning) {
+          currentMeaning.examples.push({ en: exMatch[1].trim(), zh: exMatch[2].trim() });
+        }
+        continue;
+      }
+
+      // 例句: 英文完整句 (大写开头, 句尾标点) + 中文翻译
+      var exampleMatch = line.match(/^([A-Z][a-zA-Z.,'"\-\s]{15,}[.!?])\s*([\u4e00-\u9fa5\s，。；！？、"'（）]{5,})$/);
+      if (exampleMatch && currentMeaning) {
+        currentMeaning.examples.push({ en: exampleMatch[1].trim(), zh: exampleMatch[2].trim() });
+        continue;
+      }
+
+      // 词组检测: 缩进短语 (在义项后, 以介词/动词开头)
+      if (phrasePattern.test(line) && currentWord && !currentMeaning) {
+        var phraseText = line.trim();
+        phrases.push({ phrase: phraseText, pos: '', meanings: [] });
+        continue;
+      }
+
+      // 累加当前行
+      buffer.push(line);
+    }
+
+    flushCurrentWord();
+
+    // 后处理: 过滤掉太短/无效的词条
+    words = words.filter(function (w) { return w.word && w.word.length >= 2 && !/^\d+$/.test(w.word); });
+    phrases = phrases.filter(function (p) { return p.phrase && p.phrase.length >= 3; });
+
+    return { pageNumber: pageNumber, words: words, phrases: phrases };
+  }
+
+  function extractPageNumber(lines) {
+    // 词典页码通常在页眉右上角, 是一行独立的小数字
+    for (var i = 0; i < Math.min(lines.length, 15); i++) {
+      var line = lines[i].trim();
+      var m = line.match(/^(\d{1,3})\s*$/);
+      if (m) return parseInt(m[1], 10);
+    }
+    return null;
+  }
+
+  // 把一行 "英文释义 + 中文翻译" 拆开
+  function splitEnZh(line) {
+    // 模式1: 破折号或 em-dash
+    var dash = line.match(/^(.+?)\s*[—–-]\s*(.+)$/);
+    if (dash && /[\u4e00-\u9fa5]/.test(dash[2])) {
+      return { en: dash[1].trim(), zh: dash[2].trim() };
+    }
+    // 模式2: 中文在最后 (检测第一个中文字符位置)
+    var zhIdx = -1;
+    for (var j = 0; j < line.length; j++) {
+      if (/[\u4e00-\u9fa5]/.test(line[j])) { zhIdx = j; break; }
+    }
+    if (zhIdx > 3) {
+      return { en: line.substring(0, zhIdx).trim(), zh: line.substring(zhIdx).trim() };
+    }
+    return { en: line.trim(), zh: '' };
   }
 
   // ========== Step 3: 总结页 ==========
-
   async function showSummary(importId, summary) {
     var container = document.getElementById('dictImportContainer');
 
+    // 检测缺页
     var missingPages = findMissingPages(summary.page_numbers);
 
     container.innerHTML = (
@@ -355,7 +1193,6 @@ App.DictImport = (function () {
   }
 
   // ========== Step 4: 历史批次列表 ==========
-
   async function showHistory() {
     var container = document.getElementById('dictImportContainer');
     container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--color-text-light);">加载中...</div>';
@@ -452,7 +1289,6 @@ App.DictImport = (function () {
   }
 
   // ========== Step 5: 批次详情 / 审核 ==========
-
   async function showImportDetail(importId) {
     var container = document.getElementById('dictImportContainer');
     container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--color-text-light);">加载中...</div>';
@@ -535,7 +1371,6 @@ App.DictImport = (function () {
 
   return {
     init: init,
-    showHistory: showHistory,
     retry: function () { window._dictRetry ? window._dictRetry() : showUpload(); },
   };
 })();
