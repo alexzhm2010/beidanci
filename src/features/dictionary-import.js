@@ -105,27 +105,6 @@ App.DictImport = (function () {
     return window.Tesseract;
   }
 
-  /** 检测当前浏览器是否支持 WebAssembly SIMD
-   *  iOS Safari (包括最新版) 对 SIMD WASM 支持有坑, 会导致 tesseract.js-core-simd 在 Worker 里崩溃
-   */
-  function _supportsSIMD() {
-    try {
-      // 测试一个最简单的 SIMD v128 操作
-      var bytes = new Uint8Array([
-        0x00, 0x61, 0x73, 0x6d,  // magic \0asm
-        0x01, 0x00, 0x00, 0x00,  // version 1
-        0x01, 0x05, 0x01,        // type section: 1 type
-        0x60, 0x00, 0x01, 0x7b,  // func () -> v128
-        0x03, 0x02, 0x00, 0x00,  // function section: 1 func
-        0x0a, 0x0a, 0x01,        // code section: 1 code
-        0x04, 0x00, 0x41, 0x00, 0xfd, 0x0f  // i32.const 0; simd.load(0)
-      ]);
-      return WebAssembly.validate(bytes);
-    } catch (e) {
-      return false;
-    }
-  }
-
   /** OCR 单张页面图片, 返回完整文本 (多 PSM 策略, 自动预处理) */
   async function ocrImage(file, onProgress) {
     var Tesseract = await ensureTesseract();
@@ -135,10 +114,16 @@ App.DictImport = (function () {
       if (ocrInitError) throw ocrInitError;
       try {
         var langPath = await getTessdataUrl(onProgress);
-        var simd = _supportsSIMD();
-        console.log('[DictImport] WebAssembly SIMD support:', simd, '| UA:', navigator.userAgent.slice(0, 80));
+        console.log('[DictImport] UA:', navigator.userAgent.slice(0, 100));
         var workerOpts = {
           langPath: langPath,
+          // 【铁腕方案】永远禁用 SIMD, 用 legacy core
+          // 原因: 多款国产浏览器内核 (华为 ArkWeb/Chromium M114 等) 虽然声称
+          // 支持 SIMD v128, 但 Worker 内跑 SIMD WASM 会静默崩溃, 表现为
+          // Worker 不再发消息 → 主线程超时 → JSON.parse('') 报错 "empty and invalid json"
+          // legacyCore 非 SIMD 版所有 WASM 浏览器都兼容, 词典导入低频, 慢 20% 可接受
+          legacyCore: true,
+          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/',
           logger: function (m) {
             var p = m.progress || 0;
             var map = {
@@ -155,16 +140,9 @@ App.DictImport = (function () {
             }
           }
         };
-        // iOS Safari / 老浏览器: 禁用 SIMD, 用兼容的 legacy core
-        // legacyCore: true 会让 tesseract.js 用 tesseract-core.js (非 SIMD)
-        if (!simd) {
-          console.warn('[DictImport] SIMD 不可用, 回退到 legacy core (非 SIMD)');
-          workerOpts.legacyCore = true;
-          workerOpts.corePath = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/';
-        }
-        onProgress && onProgress('创建 OCR Worker...', 0);
+        onProgress && onProgress('创建 OCR Worker (legacy core)...', 0);
         ocrWorker = await Tesseract.createWorker('eng', 1, workerOpts);
-        console.log('[DictImport] OCR Worker 创建成功');
+        console.log('[DictImport] OCR Worker 创建成功 (legacyCore=true)');
       } catch (e) {
         ocrInitError = e;
         console.error('[DictImport][createWorker] 失败:', e.message);
