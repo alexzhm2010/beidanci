@@ -296,7 +296,7 @@ App.DictImport = (function () {
     // 4. Tesseract.js 动态加载
     log('⏳', '加载 Tesseract.js v5.1.0...');
     try {
-      var Tesseract = await ensureTesseract();
+      var Tesseract = await loadTesseractVersion('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js');
       log('✅', 'Tesseract.js 加载成功', 'window.Tesseract = ' + typeof Tesseract);
     } catch (e) {
       log('❌', 'Tesseract.js 加载失败', e.message);
