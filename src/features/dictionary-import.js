@@ -23,6 +23,16 @@
  *   3. 改用未压缩 tessdata_best, 跳过 pako 解压 (省 1-2s + 省内存)
  *   4. fetchWithProgress 加速度诊断日志 (每秒 MB/s), 帮用户判断瓶颈
  *
+ * v1.15.3 卡死根因修复:
+ *   问题: v1.15.2 race 胜出后只 finished=true, 其他慢源还死循环 reader.read()
+ *         占主线程, 用户看到 "下载完成 100%" 但浏览器卡死不动
+ *   修复:
+ *   1. raceDownload 胜出后立即 AbortController.abort() 取消其他慢源
+ *      fetchWithProgress 透传 signal, signal abort 时 reader.cancel()
+ *   2. MEMFS 写入加进度提示 (15MB 同步拷贝 1-3s)
+ *   3. TessBaseAPI.Init 加进度提示 + setTimeout 让 UI 刷新
+ *      (LSTM 加载 5-20s 主线程阻塞, 不能用 timeout 保护)
+ *
  * 流程:
  *   1. 上传 (拍照/相册, 最多10张)
  *   2. OCR (tesseract-core.asm.js 直接调 TessBaseAPI, 主线程跑)
@@ -122,8 +132,10 @@ App.DictImport = (function () {
     { url: 'https://fastly.jsdelivr.net/gh/tesseract-ocr/tessdata_best/eng.traineddata', desc: 'fastly jsdelivr' },
   ];
 
-  /** 真 race 并行下载: 同时从所有源开始下, 谁先完成用谁, 其他自动取消
-   *  比串行 + HEAD 探测快得多, 慢源完全不阻塞
+  /** 真 race 并行下载: 同时从所有源开始下, 谁先完成用谁, 其他立即 AbortController 取消
+   *  v1.15.3 修复: v1.15.2 胜出后只 finished=true, 其他源还死循环 reader.read() 占主线程
+   *                → 卡死在 "下载完成 100%" 之后
+   *                改用 AbortController, 胜出后立即 abort 其他慢源的 fetch + reader
    */
   async function raceDownload(sources, label, onProgress, timeoutMs) {
     if (sources.length === 0) throw new Error(label + ' 无可用源');
@@ -131,14 +143,24 @@ App.DictImport = (function () {
       var finished = false;
       var errors = [];
       var remaining = sources.length;
+      // 每个源配一个 AbortController, 胜出后立即 abort 其他
+      var controllers = sources.map(function () {
+        return (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      });
       var progressBase = { jsdelivr: 0, unpkg: 0, fastly: 0 };
-      // 合并进度: 取所有源中下载最多的那个的百分比
       function reportProgress() {
         var maxPct = 0;
         for (var k in progressBase) { if (progressBase[k] > maxPct) maxPct = progressBase[k]; }
         if (onProgress) onProgress(label + ' 下载中 (race, 最快源 ' + maxPct + '%)...', maxPct);
       }
-      sources.forEach(function (src) {
+      function abortAllOthers(exceptIdx) {
+        for (var i = 0; i < controllers.length; i++) {
+          if (i !== exceptIdx && controllers[i]) {
+            try { controllers[i].abort(); } catch (e) { /* ignore */ }
+          }
+        }
+      }
+      sources.forEach(function (src, idx) {
         var srcKey = src.desc.split(' ')[0];
         var wrappedProgress = function (msg, pct) {
           if (!finished) {
@@ -146,16 +168,27 @@ App.DictImport = (function () {
             reportProgress();
           }
         };
-        fetchWithProgress(src.url, label + ' (' + src.desc + ')', wrappedProgress, timeoutMs)
+        var signal = controllers[idx] ? controllers[idx].signal : undefined;
+        fetchWithProgress(src.url, label + ' (' + src.desc + ')', wrappedProgress, timeoutMs, signal)
           .then(function (bytes) {
             if (finished) return;
             finished = true;
-            console.log('[DictImport] ✅ ' + label + ' race 胜出: ' + src.desc + ', ' + bytes.length + ' bytes');
+            // 立即取消所有其他慢源, 释放它们的网络/主线程占用
+            abortAllOthers(idx);
+            console.log('[DictImport] ✅ ' + label + ' race 胜出: ' + src.desc + ', ' + bytes.length + ' bytes (已 abort 其他 ' + (sources.length - 1) + ' 个慢源)');
             onProgress && onProgress(label + ' 下载完成 (' + src.desc + ')', 100);
             resolve(bytes);
           })
           .catch(function (e) {
             if (finished) return;
+            // 被 abort 的不算失败 (是其他源胜出主动取消的)
+            if (e && e.name === 'AbortError') {
+              remaining--;
+              if (remaining === 0) {
+                // 理论上不会到这里, 因为胜出的源已 resolve
+              }
+              return;
+            }
             console.warn('[DictImport] ❌ ' + label + ' 源失败 (' + src.desc + '):', e.message);
             errors.push(src.desc + ': ' + e.message);
             remaining--;
@@ -231,12 +264,20 @@ App.DictImport = (function () {
    *  v1.15.1 优化: 预分配大 Uint8Array + 流式 set, 避免最后 N 次拷贝合并
    *                (5.4MB 文件 chunk=16KB 时省 340 次 push + 1 次 5.4MB 大拷贝)
    */
-  async function fetchWithProgress(url, label, onProgress, timeoutMs) {
+  async function fetchWithProgress(url, label, onProgress, timeoutMs, signal) {
     timeoutMs = timeoutMs || 180000;
-    var resp = await withTimeout(fetch(url), timeoutMs, label + ' (fetch)');
+    // v1.15.3: 透传 AbortController.signal, raceDownload 胜出后可立即取消慢源
+    var fetchOpts = signal ? { signal: signal } : {};
+    var resp = await withTimeout(fetch(url, fetchOpts), timeoutMs, label + ' (fetch)');
     if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
     var total = parseInt(resp.headers.get('content-length'), 10) || 0;
     var reader = resp.body.getReader();
+    // v1.15.3: signal abort 时主动 cancel reader, 否则 reader.read() 会卡到 chunk 超时
+    if (signal) {
+      signal.addEventListener('abort', function () {
+        try { reader.cancel(); } catch (e) { /* ignore */ }
+      });
+    }
     // 预分配缓冲区: 知道 total 就精确分配, 不知道就先 16MB 动态扩
     var buf = total > 0 ? new Uint8Array(total) : new Uint8Array(16 * 1024 * 1024);
     var received = 0;
@@ -403,20 +444,27 @@ App.DictImport = (function () {
     // v1.15.2: tdData 已经是未压缩的 eng.traineddata, 直接写入 MEMFS, 不再 pako 解压
     console.log('[DictImport] tessdata 准备写入 MEMFS:', tdData.length, 'bytes');
 
-    // 6. 写入 MEMFS
-    console.log('[DictImport] 写入 MEMFS...');
+    // 6. 写入 MEMFS — v1.15.3: 加进度提示, 15MB 同步拷贝会卡 1-3s, 用户需看到反馈
+    onProgress && onProgress('写入 tessdata 到引擎内存 (15MB, 同步拷贝 1-3s, 请稍候)...', 90);
+    console.log('[DictImport] 写入 MEMFS (15MB, 同步)...');
+    var memfsT0 = Date.now();
     try {
       fsCreateDataFile.call(Module, '/', 'eng.traineddata', tdData, true, true, true);
-      console.log('[DictImport] MEMFS 写入成功');
+      console.log('[DictImport] MEMFS 写入成功, 耗时', (Date.now() - memfsT0) + 'ms');
     } catch (e) {
       throw new Error('写入 MEMFS 失败: ' + e.message);
     }
 
-    // 7. TessBaseAPI.Init
-    console.log('[DictImport] TessBaseAPI.Init...');
-    onProgress && onProgress('初始化 TessBaseAPI (LSTM+Legacy)...', 98);
+    // 7. TessBaseAPI.Init — v1.15.3: 加进度 + setTimeout 让 UI 刷新
+    //    这是真正的耗时大头 (LSTM 加载 5-20s, 主线程完全阻塞)
+    //    setTimeout(0) 让进度提示先渲染, 避免用户以为卡死
+    onProgress && onProgress('初始化 OCR 引擎 (LSTM 模型加载, 5-20s, 请耐心等待, 不要关闭页面)...', 95);
+    await new Promise(function (resolve) { setTimeout(resolve, 50); });
+    console.log('[DictImport] TessBaseAPI.Init (LSTM 加载, 同步阻塞 5-20s)...');
+    var initT0 = Date.now();
     var api = new Module.TessBaseAPI();
     var initResult = api.Init('/', 'eng', 1); // OEM=1
+    console.log('[DictImport] TessBaseAPI.Init 完成, 耗时', (Date.now() - initT0) + 'ms, 返回值', initResult);
     if (initResult !== 0) throw new Error('TessBaseAPI.Init 失败, 返回值=' + initResult);
 
     onProgress && onProgress('OCR 引擎就绪 🎉', 100);
