@@ -1144,8 +1144,17 @@ App.DB = (function () {
       status: 'parsing',
       summary: {},
     };
-    var resp = await api('POST', 'dictionary_imports', row, null, { returnResponse: true });
-    var list = await resp.json();
+    var resp = await api('POST', 'dictionary_imports', null, row, { returnResponse: true });
+    // 诊断: 打印 HTTP 状态 + body 长度
+    console.log('[DB] dictCreateImport resp: HTTP', resp.status, resp.statusText, 'Content-Length:', resp.headers.get('Content-Length'));
+    var text = await resp.text();
+    console.log('[DB] dictCreateImport body 长度:', text.length, '前 200:', text.slice(0, 200));
+    if (!text) {
+      throw new Error('Supabase 返回空响应 (HTTP ' + resp.status + '), 可能是未登录 (RLS 拒绝) 或 anon key 错误');
+    }
+    var list;
+    try { list = JSON.parse(text); }
+    catch (e) { throw new Error('Supabase 返回非 JSON (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
     return Array.isArray(list) ? list[0] : list;
   }
 
@@ -1164,7 +1173,7 @@ App.DB = (function () {
         parsed_at: new Date().toISOString(),
       };
     });
-    return await api('POST', 'dictionary_pages', rows);
+    return await api('POST', 'dictionary_pages', null, rows);
   }
 
   /** 批量添加词条 */
@@ -1185,7 +1194,7 @@ App.DB = (function () {
         review_status: 'pending',
       };
     });
-    return await api('POST', 'dictionary_entries', rows);
+    return await api('POST', 'dictionary_entries', null, rows);
   }
 
   /** 完成批次: 更新汇总 (总页数、词条数、页码集合、状态→review) */
@@ -1198,7 +1207,7 @@ App.DB = (function () {
       status: 'review',
       summary: summary || {},
     };
-    return await api('PATCH', 'dictionary_imports', row, 'id=eq.' + encodeURIComponent(importId));
+    return await api('PATCH', 'dictionary_imports', 'id=eq.' + encodeURIComponent(importId), row);
   }
 
   /** 列出当前用户的所有导入批次 */
