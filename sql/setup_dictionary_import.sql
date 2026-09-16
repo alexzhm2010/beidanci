@@ -7,7 +7,7 @@
 -- 1. 导入批次 (主表)
 CREATE TABLE IF NOT EXISTS dictionary_imports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES auth.uid(),
+  user_id UUID NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('camera', 'album', 'mixed')),
   total_pages INT NOT NULL DEFAULT 0,
   total_entries INT NOT NULL DEFAULT 0,
