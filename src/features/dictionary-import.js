@@ -169,16 +169,42 @@ App.DictImport = (function () {
   /** 直接初始化 tesseract-core.asm.js + tessdata
    *  完全不碰 Worker/WASM, 主线程调 Emscripten API
    */
-  /** fetch 下载 (简单版, 不用 ReadableStream — ArkWeb 对 stream reader 支持有坑)
-   *  jsdelivr CDN 1s 就能下完, 不需要进度条
+  /** fetch 下载 — ReadableStream 分块读取 (ArkWeb 上 arrayBuffer() 对大文件有坑)
+   *  v1.13.10 验证: ReadableStream 能正常下到 100%, arrayBuffer() 会卡住
    */
   async function fetchWithProgress(url, label, onProgress, timeoutMs) {
     timeoutMs = timeoutMs || 180000;
-    onProgress && onProgress(label + ' 下载中...', 50);
     var resp = await withTimeout(fetch(url), timeoutMs, label + ' (fetch)');
     if (!resp.ok) throw new Error(label + ' HTTP ' + resp.status);
-    var buf = await withTimeout(resp.arrayBuffer(), timeoutMs, label + ' (read body)');
-    var result = new Uint8Array(buf);
+    var total = parseInt(resp.headers.get('content-length'), 10) || 0;
+    var reader = resp.body.getReader();
+    var chunks = [];
+    var received = 0;
+    var lastTs = Date.now();
+    while (true) {
+      var chunk = await withTimeout(reader.read(), 30000, label + ' (read chunk)');
+      if (chunk.done) break;
+      chunks.push(chunk.value);
+      received += chunk.value.length;
+      lastTs = Date.now();
+      if (onProgress) {
+        var pct = total > 0 ? Math.round((received / total) * 100) : 50;
+        onProgress(label + ' 下载中...', pct);
+      }
+    }
+    // 合并 chunks
+    var result;
+    if (chunks.length === 0) {
+      result = new Uint8Array(0);
+    } else if (chunks.length === 1) {
+      result = chunks[0];
+    } else {
+      var totalLen = 0;
+      for (var i = 0; i < chunks.length; i++) totalLen += chunks[i].length;
+      result = new Uint8Array(totalLen);
+      var off = 0;
+      for (var i = 0; i < chunks.length; i++) { result.set(chunks[i], off); off += chunks[i].length; }
+    }
     onProgress && onProgress(label + ' 下载完成', 100);
     console.log('[DictImport] ' + label + ' 下载完成:', result.length, 'bytes');
     return result;
@@ -462,7 +488,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.11';
+    var EXPECTED_VER = '1.13.12';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
