@@ -183,7 +183,7 @@ App.DictImport = (function () {
     }
     console.log('[DictImport] core asm.js 下载完成:', coreBytes.length, 'bytes, 耗时', Math.round((Date.now()-t0)/1000) + 's');
 
-    // Blob URL 注入 script
+    // Blob URL 注入 script —— tesseract-core.asm.js 是 IIFE, 执行完 Module 就 fully initialized
     var blob = new Blob([coreBytes], { type: 'text/javascript' });
     var blobUrl = URL.createObjectURL(blob);
     await new Promise(function(resolve, reject) {
@@ -194,30 +194,17 @@ App.DictImport = (function () {
       document.head.appendChild(s);
     });
     setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 30000);
-    var Module = window.TesseractCoreASM;
-    if (!Module) throw new Error('core asm.js 加载但 window.TesseractCoreASM 未定义');
-
-    // 3. 等待 Emscripten runtime 初始化 (parse + execute 5.4MB JS)
-    onProgress && onProgress('初始化 tesseract runtime (解析 5.4MB JS)...', 60);
-    try {
-      await new Promise(function (resolve) {
-        if (Module.calledRun) { resolve(); return; }
-        if (typeof Module.onRuntimeInitialized === 'function') {
-          var oldInit = Module.onRuntimeInitialized;
-          Module.onRuntimeInitialized = function () {
-            if (oldInit) oldInit();
-            resolve();
-          };
-        } else {
-          Module.onRuntimeInitialized = resolve;
-        }
-        setTimeout(resolve, 120000); // 给 120s, 手机解析大 JS 可能很慢
-      });
-      await new Promise(function(r){ setTimeout(r, 200); });
-    } catch (e) {
-      throw new Error('Emscripten runtime 初始化超时 (120s)');
-    }
-    console.log('[DictImport] runtime 完成, 耗时累计', Math.round((Date.now()-t0)/1000) + 's');
+    // ⚠️ tesseract-core.asm.js 的 window.TesseractCoreASM 是工厂函数不是 Module!
+    // 文件结构: var TesseractCoreASM = (function(){ return function(Module){...}; })();
+    // 必须调用一次才能拿到真正的 Module 对象
+    var factory = window.TesseractCoreASM;
+    if (typeof factory !== 'function') throw new Error('core asm.js 加载但 TesseractCoreASM 不是函数, 而是: ' + typeof factory);
+    console.log('[DictImport] TesseractCoreASM 是工厂函数, 调用...');
+    var Module = factory({}); // 传入空配置对象
+    console.log('[DictImport] Module 初始化完成, keys 数量:', Object.keys(Module).length,
+      'FS_createDataFile:', typeof Module.FS_createDataFile,
+      'FS.createDataFile:', !!(Module.FS && Module.FS.createDataFile),
+      'TessBaseAPI:', typeof Module.TessBaseAPI);
 
     // 4. 探测 FS API
     var fsCreateDataFile = Module.FS_createDataFile ||
@@ -385,7 +372,7 @@ App.DictImport = (function () {
     panel.style.display = 'block';
     var logs = [];
     var VER = (window.App && window.App.VERSION) || 'unknown';
-    var EXPECTED_VER = '1.13.5';
+    var EXPECTED_VER = '1.13.6';
     function log(icon, msg, detail) {
       var line = icon + ' ' + msg;
       if (detail !== undefined) line += '\n  └─ ' + detail;
