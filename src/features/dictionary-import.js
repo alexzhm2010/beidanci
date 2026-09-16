@@ -105,6 +105,27 @@ App.DictImport = (function () {
     return window.Tesseract;
   }
 
+  /** 检测当前浏览器是否支持 WebAssembly SIMD
+   *  iOS Safari (包括最新版) 对 SIMD WASM 支持有坑, 会导致 tesseract.js-core-simd 在 Worker 里崩溃
+   */
+  function _supportsSIMD() {
+    try {
+      // 测试一个最简单的 SIMD v128 操作
+      var bytes = new Uint8Array([
+        0x00, 0x61, 0x73, 0x6d,  // magic \0asm
+        0x01, 0x00, 0x00, 0x00,  // version 1
+        0x01, 0x05, 0x01,        // type section: 1 type
+        0x60, 0x00, 0x01, 0x7b,  // func () -> v128
+        0x03, 0x02, 0x00, 0x00,  // function section: 1 func
+        0x0a, 0x0a, 0x01,        // code section: 1 code
+        0x04, 0x00, 0x41, 0x00, 0xfd, 0x0f  // i32.const 0; simd.load(0)
+      ]);
+      return WebAssembly.validate(bytes);
+    } catch (e) {
+      return false;
+    }
+  }
+
   /** OCR 单张页面图片, 返回完整文本 (多 PSM 策略, 自动预处理) */
   async function ocrImage(file, onProgress) {
     var Tesseract = await ensureTesseract();
@@ -114,7 +135,9 @@ App.DictImport = (function () {
       if (ocrInitError) throw ocrInitError;
       try {
         var langPath = await getTessdataUrl(onProgress);
-        ocrWorker = await Tesseract.createWorker('eng', 1, {
+        var simd = _supportsSIMD();
+        console.log('[DictImport] WebAssembly SIMD support:', simd, '| UA:', navigator.userAgent.slice(0, 80));
+        var workerOpts = {
           langPath: langPath,
           logger: function (m) {
             var p = m.progress || 0;
@@ -131,11 +154,23 @@ App.DictImport = (function () {
               onProgress && onProgress(label, p);
             }
           }
-        });
+        };
+        // iOS Safari / 老浏览器: 禁用 SIMD, 用兼容的 legacy core
+        // legacyCore: true 会让 tesseract.js 用 tesseract-core.js (非 SIMD)
+        if (!simd) {
+          console.warn('[DictImport] SIMD 不可用, 回退到 legacy core (非 SIMD)');
+          workerOpts.legacyCore = true;
+          workerOpts.corePath = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/';
+        }
+        onProgress && onProgress('创建 OCR Worker...', 0);
+        ocrWorker = await Tesseract.createWorker('eng', 1, workerOpts);
+        console.log('[DictImport] OCR Worker 创建成功');
       } catch (e) {
         ocrInitError = e;
-        console.error('[DictImport] OCR Worker 创建失败', e);
-        throw new Error('OCR引擎初始化失败: ' + (e.message || e));
+        console.error('[DictImport][createWorker] 失败:', e.message);
+        console.error('[DictImport][createWorker] 完整错误:', e);
+        console.error('[DictImport][createWorker] 堆栈:', e.stack);
+        throw new Error('OCR引擎初始化失败 (createWorker): ' + (e.message || e));
       }
     }
 
@@ -149,7 +184,9 @@ App.DictImport = (function () {
       onProgress && onProgress('识别中 (PSM6)...', 0);
       var r1 = await ocrWorker.recognize(canvas, { tessedit_pageseg_mode: '6' });
       text = (r1.data && r1.data.text || '').trim();
-    } catch (e) { console.warn('[DictImport] PSM6 失败', e.message); }
+    } catch (e) {
+      console.warn('[DictImport][recognize PSM6] 失败:', e.message, '| stack:', e.stack);
+    }
 
     // 策略2: PSM 6 结果太短时用 PSM 11 (稀疏文本)
     if (text.length < 30) {
@@ -158,7 +195,9 @@ App.DictImport = (function () {
         var r2 = await ocrWorker.recognize(canvas, { tessedit_pageseg_mode: '11' });
         var t2 = (r2.data && r2.data.text || '').trim();
         if (t2.length > text.length) text = t2;
-      } catch (e2) { /* 保持 text 不变 */ }
+      } catch (e2) {
+        console.warn('[DictImport][recognize PSM11] 也失败:', e2.message);
+      }
     }
 
     return text;
