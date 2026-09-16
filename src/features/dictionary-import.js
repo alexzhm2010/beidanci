@@ -190,6 +190,200 @@ App.DictImport = (function () {
     }
   }
 
+  /** OCR 环境诊断 —— 手机上无法看 console 时救命用
+   *  覆盖整条链路: UA → WASM → Tesseract 加载 → tessdata 可达 → core 文件可达 → createWorker → recognize
+   *  每一步都打印 ✅/❌ + 详细原因, 最后一键复制结果
+   */
+  async function runDiagnostics() {
+    var panel = document.getElementById('diagPanel');
+    panel.style.display = 'block';
+    var logs = [];
+    function log(icon, msg, detail) {
+      var line = icon + ' ' + msg;
+      if (detail !== undefined) line += '\n  └─ ' + detail;
+      logs.push(line);
+      panel.textContent = logs.join('\n') + '\n\n⏳ 正在检测...';
+      console.log('[DictImport][DIAG]', line);
+    }
+
+    // 1. UA / 浏览器
+    log('📱', 'UserAgent', navigator.userAgent.slice(0, 120));
+    var ua = navigator.userAgent;
+    var browser = 'Unknown';
+    if (/HarmonyOS|ArkWeb/.test(ua)) browser = 'HarmonyOS (ArkWeb)';
+    else if (/iPhone|iPad/.test(ua)) browser = 'iOS Safari';
+    else if (/Android/.test(ua) && /Chrome/.test(ua)) browser = 'Android Chrome';
+    else if (/Edg/.test(ua)) browser = 'Edge';
+    else if (/Chrome/.test(ua)) browser = 'Chrome';
+    else if (/Safari/.test(ua)) browser = 'Safari';
+    log('🌐', '识别为', browser);
+
+    // 2. WebAssembly 基础支持
+    if (typeof WebAssembly === 'undefined') {
+      log('❌', 'WebAssembly 不可用!', '这个浏览器完全不支持 WASM, OCR 无法运行');
+      showDiagResult(logs);
+      return;
+    }
+    log('✅', 'WebAssembly 可用');
+
+    // 3. WebAssembly SIMD 支持
+    try {
+      var simdBytes = new Uint8Array([
+        0x00,0x61,0x73,0x6d, 0x01,0x00,0x00,0x00, 0x01,0x05,0x01,
+        0x60,0x00,0x01,0x7b, 0x03,0x02,0x00,0x00, 0x0a,0x0a,0x01,
+        0x04,0x00,0x41,0x00,0xfd,0x0f
+      ]);
+      var simdOk = WebAssembly.validate(simdBytes);
+      log(simdOk ? '✅' : '⚠️', 'WebAssembly SIMD v128', simdOk ? '支持 (但 Worker 内可能仍然崩溃)' : '不支持');
+    } catch (e) {
+      log('⚠️', 'WebAssembly SIMD', '检测异常: ' + e.message);
+    }
+
+    // 4. Tesseract.js 动态加载
+    log('⏳', '加载 Tesseract.js v5.1.0...');
+    try {
+      var Tesseract = await ensureTesseract();
+      log('✅', 'Tesseract.js 加载成功', 'window.Tesseract = ' + typeof Tesseract);
+    } catch (e) {
+      log('❌', 'Tesseract.js 加载失败', e.message);
+      showDiagResult(logs);
+      return;
+    }
+
+    // 5. tessdata 可达性 (HEAD 请求)
+    var tessdataCandidates = [
+      { url: './tessdata', desc: '本地' },
+      { url: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0', desc: 'CDN镜像(jsdelivr)' },
+      { url: 'https://tessdata.projectnaptha.com/4.0.0', desc: '官方源(projectnaptha)' }
+    ];
+    var reachableLangPath = null;
+    for (var ti = 0; ti < tessdataCandidates.length; ti++) {
+      var tc = tessdataCandidates[ti];
+      try {
+        var resp = await fetch(tc.url + '/eng.traineddata.gz', { method: 'HEAD' });
+        if (resp.ok) { log('✅', 'tessdata ' + tc.desc, tc.url); reachableLangPath = tc.url; break; }
+        else log('❌', 'tessdata ' + tc.desc, 'HTTP ' + resp.status);
+      } catch (e) {
+        log('❌', 'tessdata ' + tc.desc, '网络错误: ' + e.message);
+      }
+    }
+    if (!reachableLangPath) {
+      log('❌', '所有 tessdata 源均不可达', 'OCR 无法加载语言包, 请检查网络');
+      showDiagResult(logs);
+      return;
+    }
+
+    // 6. tesseract-core.js 文件可达性
+    var coreFiles = [
+      { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core.js', desc: 'legacy (非 SIMD)' },
+      { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core.wasm.js', desc: 'wasm' },
+      { url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core-simd.js', desc: 'SIMD' }
+    ];
+    for (var ci = 0; ci < coreFiles.length; ci++) {
+      var cf = coreFiles[ci];
+      try {
+        var r = await fetch(cf.url, { method: 'HEAD' });
+        log(r.ok ? '✅' : '❌', 'core ' + cf.desc, r.ok ? '可达' : ('HTTP ' + r.status));
+      } catch (e) {
+        log('❌', 'core ' + cf.desc, '网络错误: ' + e.message);
+      }
+    }
+
+    // 7. createWorker —— legacyCore: true (当前方案)
+    log('⏳', 'createWorker (legacyCore: true)...');
+    var wLegacy = null, wLegacyErr = null;
+    var t0 = Date.now();
+    try {
+      wLegacy = await Tesseract.createWorker('eng', 1, {
+        langPath: reachableLangPath,
+        legacyCore: true,
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/',
+        logger: function () {},
+        errorHandler: function () {}
+      });
+      log('✅', 'createWorker legacyCore', '成功! 耗时 ' + (Date.now() - t0) + 'ms');
+    } catch (e) {
+      wLegacyErr = e;
+      log('❌', 'createWorker legacyCore', e.message);
+      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+    }
+
+    // 8. createWorker —— 默认 SIMD (对比)
+    log('⏳', 'createWorker (默认 SIMD)...');
+    var wSimd = null, wSimdErr = null;
+    try {
+      wSimd = await Tesseract.createWorker('eng', 1, {
+        langPath: reachableLangPath,
+        logger: function () {},
+        errorHandler: function () {}
+      });
+      log('⚠️', 'createWorker 默认 SIMD', '也成功了! 但可能 recognize 时才炸');
+    } catch (e) {
+      wSimdErr = e;
+      log('❌', 'createWorker 默认 SIMD', e.message);
+    }
+
+    // 9. 极简 recognize 测试 —— 用一张纯文字的小 canvas
+    log('⏳', '极简 recognize 测试...');
+    var diagText = 'Hello World';
+    try {
+      var diagCanvas = document.createElement('canvas');
+      diagCanvas.width = 300; diagCanvas.height = 80;
+      var dc = diagCanvas.getContext('2d');
+      dc.fillStyle = '#ffffff'; dc.fillRect(0, 0, 300, 80);
+      dc.fillStyle = '#000000';
+      dc.font = 'bold 36px sans-serif';
+      dc.fillText(diagText, 20, 55);
+
+      if (wLegacy) {
+        log('⏳', 'recognize with legacyCore worker...');
+        var t1 = Date.now();
+        var r1 = await wLegacy.recognize(diagCanvas);
+        var recognized = (r1.data && r1.data.text || '').trim();
+        log(recognized ? '✅' : '⚠️', 'recognize legacyCore',
+          recognized ? ('成功! 返回: "' + recognized + '" (' + (Date.now() - t1) + 'ms)') : '返回空文本');
+      }
+      if (wSimd) {
+        log('⏳', 'recognize with SIMD worker...');
+        var t2 = Date.now();
+        var r2 = await wSimd.recognize(diagCanvas);
+        var r2t = (r2.data && r2.data.text || '').trim();
+        log(r2t ? '✅' : '❌', 'recognize SIMD',
+          r2t ? ('成功! 返回: "' + r2t + '" (' + (Date.now() - t2) + 'ms)') : '返回空文本');
+      }
+    } catch (e) {
+      log('❌', 'recognize 失败', e.message);
+      log('   ', '完整错误', JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+    }
+
+    // 清理
+    try { if (wLegacy) await wLegacy.terminate(); } catch (e) {}
+    try { if (wSimd) await wSimd.terminate(); } catch (e) {}
+
+    showDiagResult(logs);
+  }
+
+  function showDiagResult(logs) {
+    var panel = document.getElementById('diagPanel');
+    panel.textContent = logs.join('\n');
+    panel.innerHTML += '\n\n' +
+      '<button id="diagCopy" style="margin-top:10px;padding:8px 14px;background:#4A90D9;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;">📋 复制诊断结果发给开发者</button>' +
+      '<button id="diagClose" style="margin-top:10px;margin-left:8px;padding:8px 14px;background:#e9ecef;color:#333;border:none;border-radius:6px;font-size:12px;cursor:pointer;">关闭</button>';
+    var copyBtn = document.getElementById('diagCopy');
+    var closeBtn = document.getElementById('diagClose');
+    if (copyBtn) copyBtn.onclick = function () {
+      navigator.clipboard.writeText(logs.join('\n')).then(function () {
+        copyBtn.textContent = '✅ 已复制';
+      }).catch(function () {
+        var ta = document.createElement('textarea');
+        ta.value = logs.join('\n'); document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); copyBtn.textContent = '✅ 已复制'; } catch (e) { copyBtn.textContent = '❌ 复制失败, 请手动长按选中'; }
+        document.body.removeChild(ta);
+      });
+    };
+    if (closeBtn) closeBtn.onclick = function () { panel.style.display = 'none'; };
+  }
+
   // ========== HTML 模板 ==========
   function containerHtml() {
     return (
@@ -227,6 +421,10 @@ App.DictImport = (function () {
           '<button class="btn btn-primary" id="btnCamera" style="flex:1;min-width:180px;">📷 拍照上传</button>' +
           '<button class="btn btn-outline" id="btnAlbum" style="flex:1;min-width:180px;">🖼 从相册选择</button>' +
         '</div>' +
+        '<div style="margin-bottom:12px;">' +
+          '<button class="btn btn-outline btn-sm" id="btnDiag" style="width:100%;">🔧 OCR 环境诊断（如果识别失败先点这个）</button>' +
+        '</div>' +
+        '<div id="diagPanel" style="display:none;background:#f8f9fa;border-radius:8px;padding:12px 14px;font-family:monospace;font-size:12px;max-height:50vh;overflow-y:auto;border:1px solid #eee;"></div>' +
         '<input type="file" id="fileCamera" accept="image/*" capture="environment" multiple style="display:none;">' +
         '<input type="file" id="fileAlbum" accept="image/*" multiple style="display:none;">' +
         '<div id="previewArea" style="display:none;margin-top:16px;"></div>' +
@@ -247,6 +445,7 @@ App.DictImport = (function () {
     document.getElementById('fileAlbum').addEventListener('change', onFileSelected);
     document.getElementById('btnReset').addEventListener('click', showUpload);
     document.getElementById('btnStartParse').addEventListener('click', startParse);
+    document.getElementById('btnDiag').addEventListener('click', runDiagnostics);
   }
 
   var selectedFiles = [];
