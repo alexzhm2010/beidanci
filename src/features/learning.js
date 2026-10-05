@@ -359,12 +359,14 @@ App.Learning = (function () {
       var prof = w.totalCount > 0 ? Math.round((w.knownCount / w.totalCount) * 100) : 0;
       var profColor = prof < 40 ? '#e74c3c' : prof < 60 ? '#f39c12' : prof < 80 ? '#3498db' : '#27ae60';
       return '<div class="prof-word-item" data-idx="' + idx + '" data-word-id="' + w.id + '">' +
-        '<div class="prof-word-main">' +
-          '<div class="prof-word-text">' + esc(w.word) + '</div>' +
-          '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
+        '<div class="prof-word-top">' +
+          '<div class="prof-word-main">' +
+            '<div class="prof-word-text">' + esc(w.word) + '</div>' +
+            '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
+          '</div>' +
+          '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
         '</div>' +
         '<div class="prof-word-bottom">' +
-          '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
           '<div class="prof-word-actions">' +
             '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不会</button>' +
             '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">会</button>' +
