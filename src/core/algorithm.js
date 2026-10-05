@@ -93,16 +93,16 @@ App.Algorithm = (function () {
       }
       // 不超过上限
       if (newStability > cfg.REVIEW_INTERVAL_MAX) newStability = cfg.REVIEW_INTERVAL_MAX;
-      word.stability = newStability;
+      word.stability = Math.round(newStability);
     } else {
       // 不认识: 稳定度大幅衰减
       var decayed = oldStability * cfg.REVIEW_STABILITY_DECAY;
       // 不低于最小重考间隔, 让用户 1 分钟后再见
       if (decayed < cfg.REVIEW_INTERVAL_MIN_FAIL) decayed = cfg.REVIEW_INTERVAL_MIN_FAIL;
-      word.stability = decayed;
+      word.stability = Math.round(decayed);
     }
 
-    // 下次到期 = 现在 + 新稳定度
+    // 下次到期 = 现在 + 新稳定度 (取整, 避免浮点数写入 BIGINT)
     word.nextReviewAt = now + word.stability;
     word.lastLearnTime = now;
     word.updatedAt = now;
