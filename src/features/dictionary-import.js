@@ -230,6 +230,7 @@ App.DictImport = (function () {
     var resp;
     var lastErr = null;
     var attempt = 0;
+    var refreshed = false; // token 过期只刷新一次, 避免死循环
     // 重试 2 次 (网络抖动 / Edge Function 冷启动)
     for (attempt = 0; attempt < 3; attempt++) {
       var tFetch = Date.now();
@@ -254,7 +255,21 @@ App.DictImport = (function () {
         var errText = '';
         try { errText = await resp.text(); } catch (e2) { errText = '(读响应失败)'; }
         addLog('⚠️', 'EDGE', 'HTTP 非 2xx', 'status=' + resp.status + ', body 前 500: ' + errText.slice(0, 500));
-        if (resp.status === 401) throw new Error('未登录或登录已过期, 请重新登录');
+        if (resp.status === 401) {
+          // token 过期: 尝试用 refresh_token 换新 token, 然后重试一次
+          if (!refreshed && App.DB && App.DB.refreshAccessToken) {
+            addLog('🔄', 'AUTH', 'HTTP 401, 尝试刷新 access_token...');
+            var ok = await App.DB.refreshAccessToken();
+            refreshed = true;
+            if (ok) {
+              token = localStorage.getItem('beidanci_access_token') || token;
+              addLog('✅', 'AUTH', 'token 刷新成功, 重试本次请求');
+              continue; // 进入下一次循环重试
+            }
+          }
+          addLog('❌', 'AUTH', 'token 刷新失败或无 refresh_token');
+          throw new Error('未登录或登录已过期, 请重新登录');
+        }
         if (resp.status === 403) throw new Error('无权限, 仅管理员可使用词典导入');
         // 404 表示 Edge Function 没部署
         if (resp.status === 404) {
@@ -643,8 +658,8 @@ App.DictImport = (function () {
       // 跳过审核直接进入总结页 (v1.12: 自动 accepted, 审核环节可在历史批次中手动调整)
       addLog('📝', 'PARSE', '自动 mark 所有 entries 为 accepted');
       await App.DB.api('PATCH', 'dictionary_entries',
-        { review_status: 'accepted' },
-        'import_id=eq.' + encodeURIComponent(importRec.id));
+        'import_id=eq.' + encodeURIComponent(importRec.id),
+        { review_status: 'accepted' });
 
       showSummary(importRec.id, summary);
 

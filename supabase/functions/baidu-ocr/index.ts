@@ -103,13 +103,27 @@ serve(async (req: Request) => {
 
       // 调百度通用文字识别 (标准版, 英文)
       const ocrT0 = Date.now();
-      const ocrResult = await callBaiduOcr(accessToken, img.data, img.mimeType || "image/jpeg");
-      const ocrDur = Date.now() - ocrT0;
+      let ocrResult = await callBaiduOcr(accessToken, img.data, img.mimeType || "image/jpeg");
+      let ocrDur = Date.now() - ocrT0;
       console.log(`[baidu-ocr][${reqId}] 百度 OCR 第 ${i + 1} 张返回: 耗时 ${ocrDur}ms, error_code=${ocrResult.error_code ?? "无"}, words_result 数量=${ocrResult.words_result?.length ?? 0}`);
+
+      // token 过期 (110/111): 清缓存, 重新拿 token, 重试一次
+      if (ocrResult.error_code === 110 || ocrResult.error_code === 111) {
+        console.log(`[baidu-ocr][${reqId}] token 失效, 清空缓存重新获取并重试`);
+        cachedToken = null;
+        tokenExpiresAt = 0;
+        const newToken = await getAccessToken();
+        if (newToken) {
+          ocrResult = await callBaiduOcr(newToken, img.data, img.mimeType || "image/jpeg");
+          console.log(`[baidu-ocr][${reqId}] 重试后 error_code=${ocrResult.error_code ?? "无"}`);
+        }
+      }
+
       if (ocrResult.error_code) {
-        console.error(`[baidu-ocr][${reqId}] 百度 OCR 错误 ${ocrResult.error_code}: ${ocrResult.error_msg}, 完整返回:`, JSON.stringify(ocrResult).slice(0, 500));
+        const friendly = baiduErrorHint(ocrResult.error_code, ocrResult.error_msg);
+        console.error(`[baidu-ocr][${reqId}] 百度 OCR 错误 ${ocrResult.error_code}: ${ocrResult.error_msg} → ${friendly}`);
         // 单张失败不影响其他张, 把错误塞进结果
-        pages.push({ text: "", error: `百度 OCR 错误 ${ocrResult.error_code}: ${ocrResult.error_msg}` });
+        pages.push({ text: "", error: friendly, error_code: ocrResult.error_code });
         continue;
       }
 
@@ -201,6 +215,30 @@ async function callBaiduOcr(accessToken: string, base64Data: string, _mimeType: 
   const result = await resp.json();
   console.log("[baidu-ocr] 百度 OCR 返回 keys:", Object.keys(result).join(","));
   return result;
+}
+
+/**
+ * 百度 OCR 错误码 → 人类可读提示
+ * 文档: https://ai.baidu.com/ai-doc/OCR/1k3h7y3db
+ */
+function baiduErrorHint(code: number, msg: string): string {
+  const map: Record<number, string> = {
+    17: "每天流量超限额 (免费版 1000 次/天已用完, 请明天再试或升级付费)",
+    18: "QPS 超限额 (请求太频繁, 请稍后重试)",
+    19: "请求总量超限额 (免费版 1000 次/月已用完, 请下个月再试或升级付费)",
+    100: "参数无效 (图片格式或大小有误)",
+    110: "Access token 无效 (请检查 API Key/Secret Key 是否正确)",
+    111: "Access token 已过期 (系统会自动重新获取, 请重试)",
+    216201: "图片格式错误 (仅支持 jpg/png/bmp, 请重新拍照)",
+    216202: "图片大小错误 (图片过大, 请压缩后重试)",
+    282003: "客户端不存在 (API Key 错误或已删除)",
+    282004: "客户端权限不足 (请在百度云控制台开通通用文字识别服务)",
+    282005: "客户端被封禁 (请联系百度云客服)",
+    282006: "客户端未激活 (请在百度云控制台激活应用)",
+  };
+  const hint = map[code];
+  if (hint) return `百度 OCR 错误 ${code}: ${hint}`;
+  return `百度 OCR 错误 ${code}: ${msg || "未知错误"}`;
 }
 
 function json(obj: any, status = 200) {

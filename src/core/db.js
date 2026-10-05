@@ -1233,8 +1233,8 @@ App.DB = (function () {
   /** 更新单个词条的审核状态 (pending→accepted/rejected) */
   async function dictUpdateEntryStatus(entryId, reviewStatus) {
     return await api('PATCH', 'dictionary_entries',
-      { review_status: reviewStatus },
-      'id=eq.' + encodeURIComponent(entryId));
+      'id=eq.' + encodeURIComponent(entryId),
+      { review_status: reviewStatus });
   }
 
   /** 发布批次: 把 accepted 词条写入 words 表 */
@@ -1247,8 +1247,8 @@ App.DB = (function () {
 
     if (entries.length === 0) {
       await api('PATCH', 'dictionary_imports',
-        { status: 'failed', summary: { error: '没有已审核(accepted)的词条' } },
-        'id=eq.' + encodeURIComponent(importId));
+        'id=eq.' + encodeURIComponent(importId),
+        { status: 'failed', summary: { error: '没有已审核(accepted)的词条' } });
       return { published: 0, merged: 0 };
     }
 
@@ -1288,12 +1288,12 @@ App.DB = (function () {
 
     var BATCH = 50;
     for (var i = 0; i < wordRows.length; i += BATCH) {
-      await api('POST', 'words', wordRows.slice(i, i + BATCH));
+      await api('POST', 'words', null, wordRows.slice(i, i + BATCH));
     }
 
     await api('PATCH', 'dictionary_imports',
-      { status: 'published', published_at: new Date().toISOString() },
-      'id=eq.' + encodeURIComponent(importId));
+      'id=eq.' + encodeURIComponent(importId),
+      { status: 'published', published_at: new Date().toISOString() });
 
     invalidateCache();
     return { published: wordRows.length, merged: entries.length - wordRows.length };
