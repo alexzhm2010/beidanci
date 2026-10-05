@@ -1,0 +1,46 @@
+name: Deploy Supabase Edge Functions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/**'
+  workflow_dispatch:
+
+jobs:
+  deploy-baidu-ocr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        run: npm install -g supabase
+
+      - name: Deploy baidu-ocr function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy baidu-ocr --project-ref gjtjivmxxelnousbqmok
+
+      - name: Set BAIDU_API_KEY secret
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase secrets set BAIDU_API_KEY=${{ secrets.BAIDU_API_KEY }} --project-ref gjtjivmxxelnousbqmok
+
+      - name: Set BAIDU_SECRET_KEY secret
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase secrets set BAIDU_SECRET_KEY=${{ secrets.BAIDU_SECRET_KEY }} --project-ref gjtjivmxxelnousbqmok
+
+      - name: Verify deployment
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            https://gjtjivmxxelnousbqmok.supabase.co/functions/v1/baidu-ocr \
+            -H "Content-Type: application/json" -d '{}')
+          echo "baidu-ocr HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "401" ]; then
+            echo "✅ Function deployed successfully (expecting 400/401 without valid auth/images)"
+          else
+            echo "❌ Unexpected status: $HTTP_CODE"
+            exit 1
+          fi
