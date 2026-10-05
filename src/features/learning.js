@@ -359,15 +359,19 @@ App.Learning = (function () {
       var prof = w.totalCount > 0 ? Math.round((w.knownCount / w.totalCount) * 100) : 0;
       var profColor = prof < 40 ? '#e74c3c' : prof < 60 ? '#f39c12' : prof < 80 ? '#3498db' : '#27ae60';
       return '<div class="prof-word-item" data-idx="' + idx + '" data-word-id="' + w.id + '">' +
-        '<div class="prof-word-main">' +
-          '<div class="prof-word-text">' + esc(w.word) + '</div>' +
-          '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
+        '<div class="prof-word-top">' +
+          '<div class="prof-word-main">' +
+            '<div class="prof-word-text">' + esc(w.word) + '</div>' +
+            '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
+          '</div>' +
+          '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
+          '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
         '</div>' +
-        '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
-        '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
-        '<div class="prof-word-actions">' +
-          '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不会</button>' +
-          '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">会</button>' +
+        '<div class="prof-word-bottom">' +
+          '<div class="prof-word-actions">' +
+            '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不会</button>' +
+            '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">会</button>' +
+          '</div>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -433,11 +437,13 @@ App.Learning = (function () {
       var actionsEl = item.querySelector('.prof-word-actions');
       if (actionsEl) actionsEl.classList.add('hidden');
 
-      // 显示结果标记
+      // 显示结果标记 (放到底部区域)
+      var bottomEl = item.querySelector('.prof-word-bottom');
       var resultEl = document.createElement('div');
       resultEl.className = 'prof-word-result ' + (isKnown ? 'result-yes' : 'result-no');
       resultEl.textContent = isKnown ? '✓ 会' : '✗ 不会';
-      item.appendChild(resultEl);
+      if (bottomEl) bottomEl.appendChild(resultEl);
+      else item.appendChild(resultEl);
 
       // 更新单词统计
       var w = profState.words[idx];
