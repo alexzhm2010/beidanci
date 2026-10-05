@@ -69,6 +69,33 @@ App.Learning = (function () {
     session: null,         // { type, words, index, results, revealed }
   };
 
+  // ========== 保存队列 (防止大量并发请求导致卡死) ==========
+  // 用户快速点击"会/不会"时, saveAnswer/saveProfAnswer 会被连续调用.
+  // 如果每个都直接发起 HTTP 请求, 几十个并发请求可能导致浏览器卡死.
+  // 解决方案: 串行队列, 一次只执行一个保存任务, 其余排队等待.
+  var _saveQueue = [];
+  var _saveQueueRunning = false;
+
+  /** 将保存任务加入队列, 串行执行 */
+  function enqueueSave(task) {
+    _saveQueue.push(task);
+    if (!_saveQueueRunning) runSaveQueue();
+  }
+
+  async function runSaveQueue() {
+    if (_saveQueueRunning) return;
+    _saveQueueRunning = true;
+    while (_saveQueue.length > 0) {
+      var task = _saveQueue.shift();
+      try {
+        await task();
+      } catch (e) {
+        console.error('[SaveQueue] 任务执行失败:', e);
+      }
+    }
+    _saveQueueRunning = false;
+  }
+
   function init() {
     // 注入 HTML 模板 (首次挂载时)
     var view = document.getElementById('view-learning');
@@ -454,27 +481,40 @@ App.Learning = (function () {
       document.getElementById('profFinishBtn').addEventListener('click', closeProficiencyWindow);
     }
 
-    function closeProficiencyWindow() {
+    async function closeProficiencyWindow() {
+      // 等待保存队列完成, 确保熟练度已持久化
+      if (_saveQueue.length > 0 || _saveQueueRunning) {
+        App.showToast('正在保存...', 'info');
+        await new Promise(function (resolve) {
+          enqueueSave(async function () { resolve(); });
+        });
+      }
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       document.body.style.overflow = '';
       if (typeof onClose === 'function') onClose();
     }
   }
 
-  /** 异步保存熟练度复习记录 */
-  async function saveProfAnswer(word, isKnown) {
-    try {
-      await App.DB.updateWord(word);
-      await App.DB.addRecord({
-        wordId: word.id,
-        word: word.word,
-        direction: 'en2cn',
-        isKnown: isKnown,
-        sessionType: 'review',
-      });
-    } catch (e) {
-      console.error('保存复习记录失败:', e);
-    }
+  /** 保存熟练度复习记录 (加入串行队列, 避免并发请求卡死) */
+  function saveProfAnswer(word, isKnown) {
+    enqueueSave(async function () {
+      try {
+        var updated = await App.DB.updateWord(word);
+        if (!updated || !updated.id) {
+          console.warn('[ProfReview] updateWord 返回空, 单词:', word.word, '可能 user_id 不匹配被 RLS 拒绝');
+        }
+        await App.DB.addRecord({
+          wordId: word.id,
+          word: word.word,
+          direction: 'en2cn',
+          isKnown: isKnown,
+          sessionType: 'review',
+        });
+      } catch (e) {
+        console.error('保存复习记录失败:', e.message);
+        App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);
+      }
+    });
   }
 
   function startSession(type, words) {
@@ -491,7 +531,15 @@ App.Learning = (function () {
     renderCard();
   }
 
-  function endSession() {
+  async function endSession() {
+    // 等待保存队列中的任务全部完成, 确保数据已持久化
+    if (_saveQueue.length > 0 || _saveQueueRunning) {
+      App.showToast('正在保存学习记录...', 'info');
+      // 把一个空任务加入队列尾部, 等它执行完说明前面的都完成了
+      await new Promise(function (resolve) {
+        enqueueSave(async function () { resolve(); });
+      });
+    }
     state.session = null;
     document.getElementById('learningCard').classList.add('hidden');
     document.querySelector('.settings-panel').classList.remove('hidden');
@@ -584,21 +632,27 @@ App.Learning = (function () {
     saveAnswer(w, isKnown);
   }
 
-  /** 异步保存学习记录到数据库 */
-  async function saveAnswer(word, isKnown) {
+  /** 保存学习记录 (加入串行队列, 避免并发请求卡死) */
+  function saveAnswer(word, isKnown) {
     var s = state.session;
-    try {
-      await App.DB.updateWord(word);
-      await App.DB.addRecord({
-        wordId: word.id,
-        word: word.word,
-        direction: s.mode,
-        isKnown: isKnown,
-        sessionType: s.type,
-      });
-    } catch (e) {
-      console.error('保存学习记录失败:', e);
-    }
+    enqueueSave(async function () {
+      try {
+        var updated = await App.DB.updateWord(word);
+        if (!updated || !updated.id) {
+          console.warn('[Learning] updateWord 返回空, 单词:', word.word, '可能 user_id 不匹配被 RLS 拒绝');
+        }
+        await App.DB.addRecord({
+          wordId: word.id,
+          word: word.word,
+          direction: s ? s.mode : 'en2cn',
+          isKnown: isKnown,
+          sessionType: s ? s.type : 'review',
+        });
+      } catch (e) {
+        console.error('保存学习记录失败:', e.message);
+        App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);
+      }
+    });
   }
 
   function handleNext() {
