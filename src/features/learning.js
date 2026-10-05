@@ -367,11 +367,11 @@ App.Learning = (function () {
           '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
         '</div>' +
         '<div class="prof-word-bottom">' +
+          '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
           '<div class="prof-word-actions">' +
             '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不会</button>' +
             '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">会</button>' +
           '</div>' +
-          '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
         '</div>' +
       '</div>';
     }).join('');

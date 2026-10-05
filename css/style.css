@@ -247,9 +247,9 @@ input, textarea, select { font-family: inherit; outline: none; }
 .prof-word-phonetic { font-size: 12px; color: var(--color-text-lighter); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prof-word-cn { flex: 1; min-width: 0; font-size: 13px; color: var(--color-text-light); padding: 4px 8px; background: var(--color-bg); border-radius: var(--radius-sm); word-break: break-all; line-height: 1.4; text-align: right; }
 .prof-word-bottom { display: flex; align-items: center; gap: 8px; width: 100%; }
+.prof-word-prof { font-size: 15px; font-weight: 600; flex: 0 0 20%; text-align: center; }
 .prof-word-actions { display: flex; gap: 8px; flex: 0 0 80%; }
 .prof-word-actions .btn-sm { flex: 1; padding: 10px 8px; font-size: 15px; border-radius: var(--radius-sm); min-height: 40px; }
-.prof-word-prof { font-size: 15px; font-weight: 600; flex: 0 0 20%; text-align: center; }
 .prof-word-result { font-size: 15px; font-weight: 600; padding: 10px 0; border-radius: var(--radius-sm); white-space: nowrap; flex: 0 0 80%; text-align: center; }
 .prof-word-result.result-yes { background: rgba(39, 174, 96, 0.15); color: var(--color-success); }
 .prof-word-result.result-no { background: rgba(231, 76, 60, 0.15); color: var(--color-danger); }
