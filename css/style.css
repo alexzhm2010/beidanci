@@ -242,8 +242,8 @@ input, textarea, select { font-family: inherit; outline: none; }
 .prof-word-item.answered-yes { border-left: 3px solid var(--color-success); }
 .prof-word-item.answered-no { border-left: 3px solid var(--color-danger); }
 .prof-word-top { display: flex; align-items: center; gap: 10px; }
-.prof-word-main { flex: 1; min-width: 0; }
-.prof-word-text { font-size: 16px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prof-word-main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.prof-word-text { font-size: 16px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
 .prof-word-phonetic { font-size: 12px; color: var(--color-text-lighter); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prof-word-cn { flex: 1; min-width: 0; font-size: 13px; color: var(--color-text-light); padding: 4px 8px; background: var(--color-bg); border-radius: var(--radius-sm); word-break: break-all; line-height: 1.4; text-align: right; }
 .prof-word-bottom { display: flex; align-items: center; gap: 8px; width: 100%; }
