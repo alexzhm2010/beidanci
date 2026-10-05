@@ -450,6 +450,15 @@ App.Learning = (function () {
       App.Algorithm.updateWordStats(w, isKnown);
       saveProfAnswer(w, isKnown);
 
+      // 即时刷新熟练度显示
+      var newProf = w.totalCount > 0 ? Math.round((w.knownCount / w.totalCount) * 100) : 0;
+      var newProfColor = newProf < 40 ? '#e74c3c' : newProf < 60 ? '#f39c12' : newProf < 80 ? '#3498db' : '#27ae60';
+      var profEl = item.querySelector('.prof-word-prof');
+      if (profEl) {
+        profEl.textContent = newProf + '%';
+        profEl.style.color = newProfColor;
+      }
+
       // 更新计数
       profState.answered++;
       if (isKnown) profState.known++;
