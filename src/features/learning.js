@@ -59,7 +59,9 @@ App.Learning = (function () {
           </div>
         </div>
 
-        <div id="learningCard" class="learning-card hidden"></div>
+        <div id="learningOverlay" class="learning-overlay hidden">
+          <div id="learningCard" class="learning-card"></div>
+        </div>
       `;
 
   var state = {
@@ -540,9 +542,10 @@ App.Learning = (function () {
       results: [],
       revealed: false,
     };
-    // 隐藏设置面板和按钮
+    // 隐藏设置面板和按钮, 显示学习卡片弹窗
     document.querySelector('.settings-panel').classList.add('hidden');
     document.querySelector('.action-buttons').classList.add('hidden');
+    document.getElementById('learningOverlay').classList.remove('hidden');
     renderCard();
   }
 
@@ -556,7 +559,7 @@ App.Learning = (function () {
       });
     }
     state.session = null;
-    document.getElementById('learningCard').classList.add('hidden');
+    document.getElementById('learningOverlay').classList.add('hidden');
     document.querySelector('.settings-panel').classList.remove('hidden');
     document.querySelector('.action-buttons').classList.remove('hidden');
     // 会话结束刷新字母分布, 反映最新熟练度
@@ -571,7 +574,6 @@ App.Learning = (function () {
     var w = s.words[s.index];
     var progress = ((s.index) / s.words.length) * 100;
     var card = document.getElementById('learningCard');
-    card.classList.remove('hidden');
 
     var esc = App.Utils.escapeHtml;
     var questionHTML, answerHTML;

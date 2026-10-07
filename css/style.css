@@ -86,7 +86,8 @@ input, textarea, select { font-family: inherit; outline: none; }
 .setting-label { font-size: 13px; color: var(--color-text-light); font-weight: 500; }
 .action-buttons { display: flex; gap: 16px; margin-bottom: 20px; }
 .action-buttons .btn { flex: 1; }
-.learning-card { background: var(--color-card); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 40px 30px; max-width: 600px; margin: 0 auto; }
+.learning-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; -webkit-overflow-scrolling: touch; }
+.learning-card { background: var(--color-card); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 40px 30px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; }
 .progress-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
 .progress-track { flex: 1; height: 8px; background: var(--color-border-light); border-radius: 4px; overflow: hidden; }
 .progress-fill { height: 100%; background: var(--color-primary); border-radius: 4px; transition: width 0.3s ease; }
@@ -275,7 +276,8 @@ input, textarea, select { font-family: inherit; outline: none; }
   .btn-toggle { flex: 1; text-align: center; padding: 10px 8px; min-height: 40px; }
   .action-buttons { flex-direction: column; gap: 10px; }
   .action-buttons .btn-large { padding: 16px; font-size: 17px; min-height: 52px; }
-  .learning-card { padding: 24px 16px; }
+  .learning-overlay { padding: 12px; }
+  .learning-card { padding: 24px 16px; max-height: 85vh; }
   .word-text { font-size: 34px; }
   .word-phonetic { font-size: 17px; }
   .word-translation-prompt { font-size: 26px; }
