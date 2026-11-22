@@ -62,48 +62,101 @@ App.Algorithm = (function () {
     return Math.log10(overdue / 60000 + 1) + 1; // 1 分钟 → 1, 1 小时 ≈ 1.78, 1 天 ≈ 3.36
   }
 
+  // ==================== "会拼写"熟悉态 (v1.18.0) ====================
+
+  /**
+   * 是否处于"会拼写"冻结期 (冻结期内任何复习入口都不应出现该词)
+   * 条件: 被标记过熟悉 (familiarAt>0) 且还没到随机复现日
+   */
+  function isFamiliarFrozen(word) {
+    var markedAt = word.familiarAt || 0;
+    var nextAt = word.familiarNextAt || 0;
+    return markedAt > 0 && Date.now() < nextAt;
+  }
+
+  /** 计算"会拼写"后的随机复现时间戳: 7~14 天内随机一天 */
+  function calcFamiliarNextAt() {
+    var cfg = C();
+    var minDays = cfg.FAMILIAR_MIN_DAYS || 7;
+    var randomDays = cfg.FAMILIAR_RANDOM_DAYS || 7;
+    var days = minDays + Math.floor(Math.random() * (randomDays + 1)); // min ~ min+random (含两端)
+    return Date.now() + days * 24 * 60 * 60 * 1000;
+  }
+
+  /** 清除熟悉态 (复现作答时调用, 让词回到正常复习节奏) */
+  function clearFamiliar(word) {
+    word.familiarAt = 0;
+    word.familiarNextAt = 0;
+  }
+
   // ==================== 答题后更新稳定度 ====================
 
   /**
    * 学习一次后更新单词统计和稳定度
    * @param {Object} word - 单词对象
-   * @param {boolean} isKnown - 是否认识
+   * @param {string|boolean} answer - 'unknown'|'known'|'familiar'; 兼容旧布尔 (true=known, false=unknown)
    * @returns {Object} 更新后的单词对象
+   *
+   * 三态规则:
+   *   - unknown (不认识):  total+1; 普通词 known 不变; 熟悉态复现词 known-1 (惩罚) 并清熟悉态; 稳定度×衰减
+   *   - known   (认识):    total+1; known+1; 清熟悉态; 稳定度×放大
+   *   - familiar(会拼写):  total+1; known+2 (快一倍, 截断到 total 上限 100%); 标记熟悉态 + 随机复现日
    */
-  function updateWordStats(word, isKnown) {
+  function updateWordStats(word, answer) {
     var cfg = C();
     var now = Date.now();
     var oldStability = getStability(word);
 
+    // 兼容旧布尔调用
+    if (typeof answer === 'boolean') answer = answer ? 'known' : 'unknown';
+    if (answer !== 'known' && answer !== 'familiar') answer = 'unknown';
+
+    var wasFamiliar = (word.familiarAt || 0) > 0; // 作答前是否处于熟悉态 (可能是复现)
+
     word.totalCount = (word.totalCount || 0) + 1;
+    var known = word.knownCount || 0;
 
-    if (isKnown) {
-      word.knownCount = (word.knownCount || 0) + 1;
+    if (answer === 'familiar') {
+      // 会拼写: 熟练度加速增长 (快一倍), 但不超过 100% (known <= total)
+      var bonus = cfg.FAMILIAR_KNOWN_BONUS || 2;
+      word.knownCount = Math.min(known + bonus, word.totalCount);
       word.lastKnownTime = now;
-
-      // 稳定度增长规则 (SM-2 思路):
-      //   第一次认识: 用初始间隔
-      //   之后每次认识: 旧稳定度 * 放大倍数
-      //   若上次不认识导致稳定度被砍, 这次认识恢复一部分 (不会暴涨)
+      // 标记熟悉态 + 随机复现日, 稳定度对齐到复现日
+      word.familiarAt = now;
+      var nextAt = calcFamiliarNextAt();
+      word.familiarNextAt = nextAt;
+      word.stability = Math.round(nextAt - now);
+      word.nextReviewAt = nextAt;
+    } else if (answer === 'known') {
+      // 认识: 正常 +1
+      word.knownCount = known + 1;
+      word.lastKnownTime = now;
+      if (wasFamiliar) clearFamiliar(word);
+      // 稳定度增长规则 (SM-2 思路)
       var newStability;
       if (oldStability === 0) {
         newStability = cfg.REVIEW_INTERVAL_INIT;
       } else {
         newStability = oldStability * cfg.REVIEW_INTERVAL_FACTOR;
       }
-      // 不超过上限
       if (newStability > cfg.REVIEW_INTERVAL_MAX) newStability = cfg.REVIEW_INTERVAL_MAX;
       word.stability = Math.round(newStability);
+      // 下次到期 = 现在 + 新稳定度 (取整, 避免浮点数写入 BIGINT)
+      word.nextReviewAt = now + word.stability;
     } else {
-      // 不认识: 稳定度大幅衰减
+      // unknown (不认识): 稳定度大幅衰减
+      if (wasFamiliar) {
+        // 熟悉态复现后仍不认识: 分子减 1 (惩罚) 并清除熟悉态
+        word.knownCount = Math.max(0, known - 1);
+        clearFamiliar(word);
+      }
+      // 普通词 knownCount 不变
       var decayed = oldStability * cfg.REVIEW_STABILITY_DECAY;
-      // 不低于最小重考间隔, 让用户 1 分钟后再见
       if (decayed < cfg.REVIEW_INTERVAL_MIN_FAIL) decayed = cfg.REVIEW_INTERVAL_MIN_FAIL;
       word.stability = Math.round(decayed);
+      word.nextReviewAt = now + word.stability;
     }
 
-    // 下次到期 = 现在 + 新稳定度 (取整, 避免浮点数写入 BIGINT)
-    word.nextReviewAt = now + word.stability;
     word.lastLearnTime = now;
     word.updatedAt = now;
     return word;
@@ -137,9 +190,9 @@ App.Algorithm = (function () {
     var now = Date.now();
     var fallbackThreshold = now - cfg.REVIEW_FALLBACK_INTERVAL;
 
-    // 只考虑已学过的词
+    // 只考虑已学过的词, 且排除"会拼写"冻结期内的词 (v1.18.0)
     var learned = allWords.filter(function (w) {
-      return w.totalCount && w.totalCount > 0;
+      return w.totalCount && w.totalCount > 0 && !isFamiliarFrozen(w);
     });
 
     // 分类: 强制兜底 / 到期 / 未到期
@@ -300,7 +353,7 @@ App.Algorithm = (function () {
   function getDueCount(allWords) {
     var now = Date.now();
     return allWords.filter(function (w) {
-      return w.totalCount && w.totalCount > 0 && now >= getNextReviewAt(w);
+      return w.totalCount && w.totalCount > 0 && !isFamiliarFrozen(w) && now >= getNextReviewAt(w);
     }).length;
   }
 
@@ -324,6 +377,9 @@ App.Algorithm = (function () {
     isDue: isDue,
     getOverdueScore: getOverdueScore,
     updateWordStats: updateWordStats,
+    isFamiliarFrozen: isFamiliarFrozen,
+    calcFamiliarNextAt: calcFamiliarNextAt,
+    clearFamiliar: clearFamiliar,
     selectNewWords: selectNewWords,
     selectReviewWords: selectReviewWords,
     // 展示辅助

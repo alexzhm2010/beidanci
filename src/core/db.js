@@ -71,6 +71,8 @@ App.DB = (function () {
       last_learn_time: w.lastLearnTime ? Math.round(w.lastLearnTime) : null,
       stability: Math.round(w.stability || 0),
       next_review_at: Math.round(w.nextReviewAt || 0),
+      familiar_at: Math.round(w.familiarAt || 0),
+      familiar_next_at: Math.round(w.familiarNextAt || 0),
       created_at: w.createdAt ? Math.round(w.createdAt) : Date.now(),
       updated_at: Date.now(),
     };
@@ -93,6 +95,8 @@ App.DB = (function () {
       lastLearnTime: r.last_learn_time || null,
       stability: r.stability || 0,
       nextReviewAt: r.next_review_at || 0,
+      familiarAt: r.familiar_at || 0,
+      familiarNextAt: r.familiar_next_at || 0,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -477,8 +481,11 @@ App.DB = (function () {
   async function getReviewCandidates(count) {
     var uid = getUserId();
     var limit = Math.min(count * 3, 500);
+    // 排除"会拼写"冻结期内的词: familiar_next_at <= now (含未标记的 0)
+    var nowMs = Date.now();
     var params = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' +
+      '&or=(familiar_next_at.eq.0,familiar_next_at.lt.' + nowMs + ')' +
       '&order=next_review_at.asc.nullsfirst' +
       '&limit=' + limit;
     var rows = await api('GET', 'words', params);
@@ -579,7 +586,7 @@ App.DB = (function () {
 
     var uid = getUserId();
     var select = lightweight
-      ? '&select=id,word,total_count,known_count,next_review_at,stability,last_learn_time,last_known_time'
+      ? '&select=id,word,total_count,known_count,next_review_at,stability,last_learn_time,last_known_time,familiar_at,familiar_next_at'
       : '';
     var base = 'user_id=eq.' + encodeURIComponent(uid) +
       '&total_count=gt.0' + select +
@@ -775,7 +782,7 @@ App.DB = (function () {
       while (true) {
         var rows = await api('GET', 'words',
           'user_id=eq.' + uidEnc +
-          '&select=id,word,total_count,known_count,last_known_time,last_learn_time,stability,next_review_at,created_at' +
+          '&select=id,word,total_count,known_count,last_known_time,last_learn_time,stability,next_review_at,familiar_at,familiar_next_at,created_at' +
           '&order=created_at.asc&limit=' + PAGE + '&offset=' + offset);
         if (!rows || rows.length === 0) break;
         for (var r = 0; r < rows.length; r++) {
@@ -804,6 +811,8 @@ App.DB = (function () {
           last_learn_time: old.last_learn_time || null,
           stability: old.stability || 0,
           next_review_at: old.next_review_at || 0,
+          familiar_at: old.familiar_at || 0,
+          familiar_next_at: old.familiar_next_at || 0,
           created_at: old.created_at,
           updated_at: Date.now(),
         };

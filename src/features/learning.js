@@ -279,9 +279,10 @@ App.Learning = (function () {
       // 拉取已学习的单词 (不传limit, 获取全部已学词, 与统计页面熟练度分布口径一致)
       var allWords = await App.DB.getLearnedWords();
 
-      // 筛选指定熟练度区间的单词 (排除未学习的)
+      // 筛选指定熟练度区间的单词 (排除未学习 + "会拼写"冻结期内的词)
       var filtered = allWords.filter(function (w) {
         if (!w.totalCount || w.totalCount === 0) return false;
+        if (App.Algorithm.isFamiliarFrozen(w)) return false;
         var prof = w.knownCount / w.totalCount;
         // 80-100 区间包含 1.0
         if (maxP === 1) return prof >= minP && prof <= maxP;
@@ -313,6 +314,7 @@ App.Learning = (function () {
 
       var filtered = allWords.filter(function (w) {
         if (!w.totalCount || w.totalCount === 0) return false;
+        if (App.Algorithm.isFamiliarFrozen(w)) return false;
         var first = w.word.charAt(0).toUpperCase();
         // letter === '#' 表示非 A-Z 开头
         var match = letter === '#' ? !/[A-Z]/.test(first) : first === letter;
@@ -371,8 +373,9 @@ App.Learning = (function () {
         '<div class="prof-word-bottom">' +
           '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
           '<div class="prof-word-actions">' +
-            '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不会</button>' +
-            '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">会</button>' +
+            '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不认识</button>' +
+            '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">认识</button>' +
+            '<button class="btn btn-familiar btn-sm prof-btn-familiar" data-word-id="' + w.id + '" data-idx="' + idx + '">会拼写</button>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -406,6 +409,7 @@ App.Learning = (function () {
       answered: 0,
       known: 0,
       unknown: 0,
+      familiar: 0,
       results: [],
     };
 
@@ -414,22 +418,23 @@ App.Learning = (function () {
       closeProficiencyWindow();
     });
 
-    // 会/不会按钮 (事件委托)
+    // 不认识/认识/会拼写 按钮 (事件委托)
     var listEl = document.getElementById('proficiencyList');
     listEl.addEventListener('click', function (e) {
-      var btn = e.target.closest('.prof-btn-yes, .prof-btn-no');
+      var btn = e.target.closest('.prof-btn-yes, .prof-btn-no, .prof-btn-familiar');
       if (!btn) return;
       var idx = parseInt(btn.dataset.idx);
       var wordId = btn.dataset.wordId;
-      var isKnown = btn.classList.contains('prof-btn-yes');
-      handleProfAnswer(idx, wordId, isKnown, profState);
+      var answer = btn.classList.contains('prof-btn-familiar') ? 'familiar'
+        : btn.classList.contains('prof-btn-yes') ? 'known' : 'unknown';
+      handleProfAnswer(idx, wordId, answer, profState);
     });
 
-    function handleProfAnswer(idx, wordId, isKnown, profState) {
+    function handleProfAnswer(idx, wordId, answer, profState) {
       var item = listEl.querySelector('[data-idx="' + idx + '"]');
       if (!item || item.classList.contains('answered')) return;
       item.classList.add('answered');
-      item.classList.add(isKnown ? 'answered-yes' : 'answered-no');
+      item.classList.add(answer === 'familiar' ? 'answered-familiar' : answer === 'known' ? 'answered-yes' : 'answered-no');
 
       // 显示中文释义
       var cnEl = item.querySelector('.prof-word-cn');
@@ -440,17 +445,18 @@ App.Learning = (function () {
       if (actionsEl) actionsEl.classList.add('hidden');
 
       // 显示结果标记 (放到底部区域)
+      var isKnown = answer === 'known' || answer === 'familiar';
       var bottomEl = item.querySelector('.prof-word-bottom');
       var resultEl = document.createElement('div');
-      resultEl.className = 'prof-word-result ' + (isKnown ? 'result-yes' : 'result-no');
-      resultEl.textContent = isKnown ? '✓ 会' : '✗ 不会';
+      resultEl.className = 'prof-word-result ' + (answer === 'familiar' ? 'result-familiar' : isKnown ? 'result-yes' : 'result-no');
+      resultEl.textContent = answer === 'familiar' ? '★ 会拼写' : isKnown ? '✓ 认识' : '✗ 不认识';
       if (bottomEl) bottomEl.appendChild(resultEl);
       else item.appendChild(resultEl);
 
       // 更新单词统计
       var w = profState.words[idx];
-      App.Algorithm.updateWordStats(w, isKnown);
-      saveProfAnswer(w, isKnown);
+      App.Algorithm.updateWordStats(w, answer);
+      saveProfAnswer(w, answer);
 
       // 即时刷新熟练度显示
       var newProf = w.totalCount > 0 ? Math.round((w.knownCount / w.totalCount) * 100) : 0;
@@ -463,9 +469,10 @@ App.Learning = (function () {
 
       // 更新计数
       profState.answered++;
+      if (answer === 'familiar') profState.familiar++;
       if (isKnown) profState.known++;
       else profState.unknown++;
-      profState.results.push({ wordId: wordId, isKnown: isKnown });
+      profState.results.push({ wordId: wordId, isKnown: isKnown, answer: answer });
 
       // 更新进度条
       var progress = (profState.answered / profState.words.length) * 100;
@@ -485,12 +492,14 @@ App.Learning = (function () {
       var accuracy = total > 0 ? Math.round((known / total) * 100) : 0;
       var accuracyColor = accuracy >= 80 ? '#27AE60' : accuracy >= 50 ? '#F39C12' : '#E74C3C';
 
+      var familiar = profState.familiar || 0;
       var summary = document.getElementById('profSummary');
       summary.innerHTML =
         '<div class="summary-stats">' +
           '<div class="summary-stat"><span class="num">' + total + '</span><span class="label">总词数</span></div>' +
-          '<div class="summary-stat"><span class="num" style="color:#27AE60">' + known + '</span><span class="label">会</span></div>' +
-          '<div class="summary-stat"><span class="num" style="color:#E74C3C">' + unknown + '</span><span class="label">不会</span></div>' +
+          '<div class="summary-stat"><span class="num" style="color:#6c5ce7">' + familiar + '</span><span class="label">会拼写</span></div>' +
+          '<div class="summary-stat"><span class="num" style="color:#27AE60">' + (known - familiar) + '</span><span class="label">认识</span></div>' +
+          '<div class="summary-stat"><span class="num" style="color:#E74C3C">' + unknown + '</span><span class="label">不认识</span></div>' +
           '<div class="summary-stat"><span class="num" style="color:' + accuracyColor + '">' + accuracy + '%</span><span class="label">正确率</span></div>' +
         '</div>';
 
@@ -513,7 +522,8 @@ App.Learning = (function () {
   }
 
   /** 保存熟练度复习记录 (加入串行队列, 避免并发请求卡死) */
-  function saveProfAnswer(word, isKnown) {
+  function saveProfAnswer(word, answer) {
+    var isKnown = answer === 'known' || answer === 'familiar';
     enqueueSave(async function () {
       try {
         var updated = await App.DB.updateWord(word);
@@ -526,7 +536,7 @@ App.Learning = (function () {
           // 熟练度/字母复习窗口固定展示"英文+音标 → 中文释义", 即 en2cn, 与界面一致
           direction: 'en2cn',
           isKnown: isKnown,
-          sessionType: 'review',
+          sessionType: answer === 'familiar' ? 'familiar' : 'review',
         });
       } catch (e) {
         console.error('保存复习记录失败:', e.message);
@@ -612,6 +622,7 @@ App.Learning = (function () {
       '<div class="word-actions" id="wordActions">' +
         '<button class="btn btn-danger" id="btnUnknown">不认识</button>' +
         '<button class="btn btn-success" id="btnKnown">认识</button>' +
+        '<button class="btn btn-familiar" id="btnFamiliar">会拼写</button>' +
       '</div>' +
       '<div class="word-next hidden" id="wordNext">' +
         '<button class="btn btn-primary" id="btnNext">' +
@@ -619,23 +630,26 @@ App.Learning = (function () {
         '</button>' +
       '</div>';
 
-    document.getElementById('btnKnown').addEventListener('click', function () { handleAnswer(true); });
-    document.getElementById('btnUnknown').addEventListener('click', function () { handleAnswer(false); });
+    document.getElementById('btnKnown').addEventListener('click', function () { handleAnswer('known'); });
+    document.getElementById('btnUnknown').addEventListener('click', function () { handleAnswer('unknown'); });
+    document.getElementById('btnFamiliar').addEventListener('click', function () { handleAnswer('familiar'); });
     document.getElementById('btnNext').addEventListener('click', handleNext);
   }
 
   // ========== 答题逻辑 ==========
 
-  function handleAnswer(isKnown) {
+  function handleAnswer(answer) {
     var s = state.session;
     if (!s || s.revealed) return;
     s.revealed = true;
 
     var w = s.words[s.index];
-    s.results.push({ wordId: w.id, word: w.word, isKnown: isKnown });
+    // 会拼写视同"掌握"参与正确率统计; 记录原始 answer 供展示
+    var isKnown = answer === 'known' || answer === 'familiar';
+    s.results.push({ wordId: w.id, word: w.word, isKnown: isKnown, answer: answer });
 
     // 更新单词统计 (纯内存操作, 无延迟)
-    App.Algorithm.updateWordStats(w, isKnown);
+    App.Algorithm.updateWordStats(w, answer);
 
     // 立即揭示答案 (UI 先响应, 不等网络)
     document.getElementById('wordAnswer').classList.remove('hidden');
@@ -648,12 +662,14 @@ App.Learning = (function () {
     document.querySelector('.progress-text').textContent = (s.index + 1) + '/' + s.words.length;
 
     // 异步保存到数据库 (不阻塞 UI)
-    saveAnswer(w, isKnown);
+    saveAnswer(w, answer);
   }
 
   /** 保存学习记录 (加入串行队列, 避免并发请求卡死) */
-  function saveAnswer(word, isKnown) {
+  function saveAnswer(word, answer) {
     var s = state.session;
+    // 会拼写按"认识"计入记录 (统计正确率时算掌握)
+    var isKnown = answer === 'known' || answer === 'familiar';
     enqueueSave(async function () {
       try {
         var updated = await App.DB.updateWord(word);
@@ -665,7 +681,7 @@ App.Learning = (function () {
           word: word.word,
           direction: (s && s.mode) || state.mode || 'en2cn',
           isKnown: isKnown,
-          sessionType: s ? s.type : 'review',
+          sessionType: answer === 'familiar' ? 'familiar' : (s ? s.type : 'review'),
         });
       } catch (e) {
         console.error('保存学习记录失败:', e.message);

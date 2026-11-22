@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS words (
   last_learn_time   BIGINT,
   stability         BIGINT NOT NULL DEFAULT 0,
   next_review_at    BIGINT NOT NULL DEFAULT 0,
+  familiar_at       BIGINT NOT NULL DEFAULT 0,
+  familiar_next_at  BIGINT NOT NULL DEFAULT 0,
   created_at        BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   updated_at        BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
 );
@@ -30,6 +32,9 @@ CREATE TABLE IF NOT EXISTS words (
 -- 给已有数据库添加新列 (已存在则跳过)
 ALTER TABLE words ADD COLUMN IF NOT EXISTS stability BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE words ADD COLUMN IF NOT EXISTS next_review_at BIGINT NOT NULL DEFAULT 0;
+-- v1.18.0: "会拼写"熟悉态 (familiar_at=标记时间, familiar_next_at=随机复现时间)
+ALTER TABLE words ADD COLUMN IF NOT EXISTS familiar_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE words ADD COLUMN IF NOT EXISTS familiar_next_at BIGINT NOT NULL DEFAULT 0;
 
 -- 学习记录表
 CREATE TABLE IF NOT EXISTS records (

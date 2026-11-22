@@ -65,7 +65,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.17.3',
+  APP_VERSION: '1.18.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
@@ -154,6 +154,13 @@ App.Config = {
 
   // 随机抽样比例 — 选词时从到期词中按此比例抽样, 避免每次都是固定顺序
   REVIEW_RANDOM_RATIO: 0.5,
+
+  // ========== "会拼写"熟悉态参数 (v1.18.0) ==========
+  // 用户点"会拼写"后, 该词进入熟悉冻结期, 任何复习入口都不再出现
+  // 冻结期 = FAMILIAR_MIN_DAYS ~ (FAMILIAR_MIN_DAYS + FAMILIAR_RANDOM_DAYS) 天之间随机取一天复现
+  FAMILIAR_MIN_DAYS: 7,        // 最少冻结 7 天
+  FAMILIAR_RANDOM_DAYS: 7,     // 额外随机 0~7 天 (即 7~14 天后随机复现)
+  FAMILIAR_KNOWN_BONUS: 2,     // 点"会拼写"时 knownCount 增量 ("会"是 1, 这里快一倍 = 2)
 
   // 词典API (有道公开接口,可能受CORS限制,失败时手动填写)
   DICT_API_YOUDAO: 'https://dict.youdao.com/jsonapi?q=',
