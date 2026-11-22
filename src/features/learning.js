@@ -279,10 +279,10 @@ App.Learning = (function () {
       // 拉取已学习的单词 (不传limit, 获取全部已学词, 与统计页面熟练度分布口径一致)
       var allWords = await App.DB.getLearnedWords();
 
-      // 筛选指定熟练度区间的单词 (排除未学习 + "会拼写"冻结期内的词)
+      // 筛选指定熟练度区间的单词 (排除未学习的)
+      // v1.18.1: 不再排除冻结词 —— 冻结词仍在区间内, 由弹窗排到底部并标记锁定
       var filtered = allWords.filter(function (w) {
         if (!w.totalCount || w.totalCount === 0) return false;
-        if (App.Algorithm.isFamiliarFrozen(w)) return false;
         var prof = w.knownCount / w.totalCount;
         // 80-100 区间包含 1.0
         if (maxP === 1) return prof >= minP && prof <= maxP;
@@ -314,7 +314,7 @@ App.Learning = (function () {
 
       var filtered = allWords.filter(function (w) {
         if (!w.totalCount || w.totalCount === 0) return false;
-        if (App.Algorithm.isFamiliarFrozen(w)) return false;
+        // v1.18.1: 不再排除冻结词 —— 与字母方块"未掌握数"口径保持一致, 冻结词由弹窗排底部标记
         var first = w.word.charAt(0).toUpperCase();
         // letter === '#' 表示非 A-Z 开头
         var match = letter === '#' ? !/[A-Z]/.test(first) : first === letter;
@@ -359,10 +359,30 @@ App.Learning = (function () {
     overlay.id = 'proficiencyOverlay';
 
     var esc = App.Utils.escapeHtml;
-    var listHTML = words.map(function (w, idx) {
+
+    // v1.18.1: 把"会拼写"冻结词稳定分区到列表末尾 (组内保留原有熟练度升序)
+    var activeWords = [];
+    var lockedWords = [];
+    words.forEach(function (w) {
+      if (App.Algorithm.isFamiliarFrozen(w)) lockedWords.push(w);
+      else activeWords.push(w);
+    });
+    var orderedWords = activeWords.concat(lockedWords);
+    var answerableCount = activeWords.length; // 可答题数 (锁定词不计入进度分母)
+
+    var listHTML = orderedWords.map(function (w, idx) {
       var prof = w.totalCount > 0 ? Math.round((w.knownCount / w.totalCount) * 100) : 0;
       var profColor = prof < 40 ? '#e74c3c' : prof < 60 ? '#f39c12' : prof < 80 ? '#3498db' : '#27ae60';
-      return '<div class="prof-word-item" data-idx="' + idx + '" data-word-id="' + w.id + '">' +
+      var frozen = App.Algorithm.isFamiliarFrozen(w);
+      var remainDays = frozen ? Math.max(1, Math.ceil((w.familiarNextAt - Date.now()) / 86400000)) : 0;
+      var rightHTML = frozen
+        ? '<div class="prof-word-locked">🔒 锁定期内 · 约 ' + remainDays + ' 天后可复习</div>'
+        : '<div class="prof-word-actions">' +
+            '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不认识</button>' +
+            '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">认识</button>' +
+            '<button class="btn btn-familiar btn-sm prof-btn-familiar" data-word-id="' + w.id + '" data-idx="' + idx + '">会拼写</button>' +
+          '</div>';
+      return '<div class="prof-word-item' + (frozen ? ' is-locked' : '') + '" data-idx="' + idx + '" data-word-id="' + w.id + '">' +
         '<div class="prof-word-top">' +
           '<div class="prof-word-main">' +
             '<div class="prof-word-text">' + esc(w.word) + '</div>' +
@@ -372,11 +392,7 @@ App.Learning = (function () {
         '</div>' +
         '<div class="prof-word-bottom">' +
           '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
-          '<div class="prof-word-actions">' +
-            '<button class="btn btn-danger btn-sm prof-btn-no" data-word-id="' + w.id + '" data-idx="' + idx + '">不认识</button>' +
-            '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">认识</button>' +
-            '<button class="btn btn-familiar btn-sm prof-btn-familiar" data-word-id="' + w.id + '" data-idx="' + idx + '">会拼写</button>' +
-          '</div>' +
+          rightHTML +
         '</div>' +
       '</div>';
     }).join('');
@@ -386,11 +402,11 @@ App.Learning = (function () {
     overlay.innerHTML =
       '<div class="proficiency-window">' +
         '<div class="proficiency-header">' +
-          '<div class="proficiency-title">' + title + ' (' + words.length + '词)</div>' +
+          '<div class="proficiency-title">' + title + ' (' + orderedWords.length + '词' + (lockedWords.length ? '，' + lockedWords.length + '个锁定' : '') + ')</div>' +
           '<button class="proficiency-close" id="profCloseBtn">&times;</button>' +
         '</div>' +
         '<div class="proficiency-progress">' +
-          '<span id="profProgressText">0 / ' + words.length + '</span>' +
+          '<span id="profProgressText">0 / ' + answerableCount + '</span>' +
           '<div class="progress-track"><div class="progress-fill" id="profProgressFill" style="width:0%"></div></div>' +
         '</div>' +
         '<div class="proficiency-list" id="proficiencyList">' + listHTML + '</div>' +
@@ -403,9 +419,10 @@ App.Learning = (function () {
     document.body.appendChild(overlay);
     document.body.style.overflow = 'hidden';
 
-    // 存储状态
+    // 存储状态 (words 用重排后的顺序, idx 与之对应; answerableCount 为进度分母)
     var profState = {
-      words: words,
+      words: orderedWords,
+      answerableCount: answerableCount,
       answered: 0,
       known: 0,
       unknown: 0,
@@ -429,6 +446,11 @@ App.Learning = (function () {
         : btn.classList.contains('prof-btn-yes') ? 'known' : 'unknown';
       handleProfAnswer(idx, wordId, answer, profState);
     });
+
+    // 边界: 若全部词都在锁定期 (无可答题), 直接显示总结, 避免用户卡在无按钮界面
+    if (answerableCount === 0) {
+      showProfSummary(profState);
+    }
 
     function handleProfAnswer(idx, wordId, answer, profState) {
       var item = listEl.querySelector('[data-idx="' + idx + '"]');
@@ -474,13 +496,14 @@ App.Learning = (function () {
       else profState.unknown++;
       profState.results.push({ wordId: wordId, isKnown: isKnown, answer: answer });
 
-      // 更新进度条
-      var progress = (profState.answered / profState.words.length) * 100;
-      document.getElementById('profProgressText').textContent = profState.answered + ' / ' + profState.words.length;
+      // 更新进度条 (分母为可答题数, 锁定词不计入)
+      var totalAnswerable = profState.answerableCount;
+      var progress = totalAnswerable > 0 ? (profState.answered / totalAnswerable) * 100 : 100;
+      document.getElementById('profProgressText').textContent = profState.answered + ' / ' + totalAnswerable;
       document.getElementById('profProgressFill').style.width = progress + '%';
 
       // 全部答完显示总结
-      if (profState.answered >= profState.words.length) {
+      if (profState.answered >= totalAnswerable) {
         showProfSummary(profState);
       }
     }
