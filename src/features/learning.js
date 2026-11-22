@@ -164,11 +164,12 @@ App.Learning = (function () {
       var dist = await App.DB.getLetterDistribution();
 
       // 26 个字母初始化 (A-Z) + "#其他" 兜底非 A-Z 开头的词
+      // v1.18.2: actionable = 可作答的未掌握词 (排除会拼写锁定词), 方块分子/百分比/颜色均用它
       var stats = {};
       for (var i = 0; i < 26; i++) {
-        stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
+        stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0, actionable: 0 };
       }
-      stats['#'] = { total: 0, mastered: 0, unmastered: 0 };
+      stats['#'] = { total: 0, mastered: 0, unmastered: 0, actionable: 0 };
 
       // 合并 RPC 返回的桶 (只含 total > 0 的字母, 其余保留零值)
       if (Array.isArray(dist)) {
@@ -177,6 +178,9 @@ App.Learning = (function () {
             stats[b.letter].total = b.total || 0;
             stats[b.letter].mastered = b.mastered || 0;
             stats[b.letter].unmastered = b.unmastered || 0;
+            // 兼容旧 RPC 无 actionable 字段: 回退到 unmastered
+            var act = (b.actionable != null) ? b.actionable : b.unmastered;
+            stats[b.letter].actionable = act || 0;
           }
         });
       }
@@ -185,20 +189,20 @@ App.Learning = (function () {
       var keys = Object.keys(stats).filter(function (k) { return k !== '#'; });
       if (stats['#'].total > 0) keys.push('#');
 
-      // 颜色渐变: 按"未掌握占比" unmastered/total 做 min-max 归一化
+      // 颜色渐变: 按"可作答占比" actionable/total 做 min-max 归一化 (v1.18.2)
       // 保证无论数据分布如何, 占比最高的字母=红(0°), 最低的=绿(120°), 拉开区分度
       var ratios = [];
       keys.forEach(function (k) {
         var s = stats[k];
-        if (s.total > 0) ratios.push(s.unmastered / s.total);
+        if (s.total > 0) ratios.push(s.actionable / s.total);
       });
       var rMin = ratios.length ? Math.min.apply(null, ratios) : 0;
       var rMax = ratios.length ? Math.max.apply(null, ratios) : 0;
       var rRange = rMax - rMin;
 
-      function hueFor(unmastered, total) {
+      function hueFor(actionable, total) {
         if (total === 0) return 120;
-        var r = unmastered / total;
+        var r = actionable / total;
         var norm = rRange > 0 ? (r - rMin) / rRange : 0; // 0=最好, 1=最差
         return (1 - norm) * 120; // 最差->0°红, 最好->120°绿
       }
@@ -212,15 +216,15 @@ App.Learning = (function () {
         if (s.total === 0) {
           cls += ' is-empty';
         } else {
-          var hue = hueFor(s.unmastered, s.total);
+          var hue = hueFor(s.actionable, s.total);
           style = ' style="background:hsl(' + hue + ',75%,90%);border-color:hsl(' + hue + ',70%,50%);"';
-          var pct = Math.round((s.unmastered / s.total) * 100);
+          var pct = Math.round((s.actionable / s.total) * 100);
           pctText = ' <span class="letter-pct">(' + pct + '%)</span>';
         }
         html +=
           '<div class="' + cls + '" data-letter="' + ch + '"' + style + '>' +
             '<div class="letter-head">' + ch + pctText + '</div>' +
-            '<div class="letter-count">' + s.unmastered + '/' + s.total + '</div>' +
+            '<div class="letter-count">' + s.actionable + '/' + s.total + '</div>' +
           '</div>';
       });
       grid.innerHTML = html;

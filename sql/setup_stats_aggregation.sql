@@ -11,14 +11,19 @@
 --   3. 若 RPC 未部署, 前端自动降级到客户端聚合 (兼容旧部署)
 -- ============================================================
 
--- 1. 字母分布: 按首字母 (A-Z + #其他) 统计 total / mastered / unmastered
---    mastered  = known_count / total_count >= 0.80 (与前端 renderLetterStats 口径一致)
---    返回 JSON 数组: [{letter, total, mastered, unmastered}, ...]
+-- 1. 字母分布: 按首字母 (A-Z + #其他) 统计 total / mastered / unmastered / actionable
+--    mastered   = known_count / total_count >= 0.80 (与前端 renderLetterStats 口径一致)
+--    unmastered = known_count / total_count < 0.80 (含锁定词)
+--    actionable = unmastered 中"可作答"的词, 即未处于会拼写锁定期
+--                 (familiar_at > 0 且 familiar_next_at > now 视为锁定)
+--    v1.18.2: 字母方块分子/百分比改用 actionable, 与"能答几道题"对齐
+--    返回 JSON 数组: [{letter, total, mastered, unmastered, actionable}, ...]
 CREATE OR REPLACE FUNCTION get_letter_distribution()
 RETURNS JSON AS $$
 DECLARE
   uid UUID := auth.uid();
   result JSON;
+  now_ms BIGINT := (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT;
 BEGIN
   IF uid IS NULL THEN
     RETURN json_build_object('error', 'not_authenticated');
@@ -30,7 +35,11 @@ BEGIN
       letter,
       COUNT(*) AS total,
       COUNT(*) FILTER (WHERE ratio >= 0.80) AS mastered,
-      COUNT(*) FILTER (WHERE ratio < 0.80) AS unmastered
+      COUNT(*) FILTER (WHERE ratio < 0.80) AS unmastered,
+      COUNT(*) FILTER (
+        WHERE ratio < 0.80
+          AND NOT (COALESCE(familiar_at, 0) > 0 AND COALESCE(familiar_next_at, 0) > now_ms)
+      ) AS actionable
     FROM (
       SELECT
         CASE
@@ -40,7 +49,9 @@ BEGIN
         CASE
           WHEN total_count > 0 THEN known_count::FLOAT / total_count
           ELSE 0
-        END AS ratio
+        END AS ratio,
+        familiar_at,
+        familiar_next_at
       FROM words
       WHERE user_id = uid
         AND total_count > 0

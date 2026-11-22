@@ -640,24 +640,34 @@ App.DB = (function () {
 
     // 降级: 前端按首字母分桶 (与 renderLetterStats 原逻辑一致)
     var words = await getLearnedWords(undefined, { lightweight: true });
+    var nowMs = Date.now();
     var stats = {};
-    for (var i = 0; i < 26; i++) stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0 };
-    stats['#'] = { total: 0, mastered: 0, unmastered: 0 };
+    for (var i = 0; i < 26; i++) stats[String.fromCharCode(65 + i)] = { total: 0, mastered: 0, unmastered: 0, actionable: 0 };
+    stats['#'] = { total: 0, mastered: 0, unmastered: 0, actionable: 0 };
     words.forEach(function (w) {
       if (!w.word) return;
       var letter = w.word.charAt(0).toUpperCase();
       var key = stats[letter] ? letter : '#';
       stats[key].total++;
-      if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) stats[key].mastered++;
-      else stats[key].unmastered++;
+      if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) {
+        stats[key].mastered++;
+      } else {
+        stats[key].unmastered++;
+        // v1.18.2: 可作答 = 未掌握 且 不在会拼写锁定期
+        var locked = (w.familiarAt || 0) > 0 && nowMs < (w.familiarNextAt || 0);
+        if (!locked) stats[key].actionable++;
+      }
     });
     var result = Object.keys(stats)
       .filter(function (k) { return k !== '#'; })
       .map(function (k) {
-        return { letter: k, total: stats[k].total, mastered: stats[k].mastered, unmastered: stats[k].unmastered };
+        return {
+          letter: k, total: stats[k].total, mastered: stats[k].mastered,
+          unmastered: stats[k].unmastered, actionable: stats[k].actionable
+        };
       });
     if (stats['#'].total > 0) {
-      result.push({ letter: '#', total: stats['#'].total, mastered: stats['#'].mastered, unmastered: stats['#'].unmastered });
+      result.push({ letter: '#', total: stats['#'].total, mastered: stats['#'].mastered, unmastered: stats['#'].unmastered, actionable: stats['#'].actionable });
     }
     _cacheSet(cacheKey, result);
     return result;
