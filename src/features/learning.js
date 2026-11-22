@@ -523,6 +523,7 @@ App.Learning = (function () {
         await App.DB.addRecord({
           wordId: word.id,
           word: word.word,
+          // 熟练度/字母复习窗口固定展示"英文+音标 → 中文释义", 即 en2cn, 与界面一致
           direction: 'en2cn',
           isKnown: isKnown,
           sessionType: 'review',
@@ -537,6 +538,7 @@ App.Learning = (function () {
   function startSession(type, words) {
     state.session = {
       type: type,
+      mode: state.mode, // 固定当前学习方向, 供 saveAnswer 写记录用 (避免 s.mode 为 undefined)
       words: words,
       index: 0,
       results: [],
@@ -661,7 +663,7 @@ App.Learning = (function () {
         await App.DB.addRecord({
           wordId: word.id,
           word: word.word,
-          direction: s ? s.mode : 'en2cn',
+          direction: (s && s.mode) || state.mode || 'en2cn',
           isKnown: isKnown,
           sessionType: s ? s.type : 'review',
         });
