@@ -1,9 +1,11 @@
 /**
  * Victor 词库同步 Edge Function (v1.24.0)
  *
- * 作用: 把共享底座词库(vw_* 四表) 整份复制到指定用户私有四表(uw_*), 后端执行, 不依赖浏览器常驻。
- *       v1.24.0 起废弃 detail JSONB 快照, 富内容改为结构化四表, 与 Victor 底座字段 100% 一致。
- * 触发: 前端点「同步 Victor」→ POST { syncCode }
+ * 作用:
+ *   1) 把共享底座词库(vw_* 四表) 整份复制到指定用户私有四表(uw_*) —— 富内容, 与 Victor 字段 100% 一致
+ *   2) 把底座独有的词补进用户自己的 words 表 (清单扩充) —— v1.25.0 新增, 需 userId
+ *   后端执行, 不依赖浏览器常驻。用户词表原有单词一个不动、不删。
+ * 触发: 前端点「同步 Victor」→ POST { syncCode, userId }
  *
  * 执行模型:
  *   1. 创建 sync_jobs 任务记录(pending), 服务端同步分批执行全程 (每批调 victor_sync_batch RPC)
@@ -93,7 +95,7 @@ async function baseTotal(): Promise<number> {
 }
 
 /** 后台分批同步全流程 */
-async function runSync(jobId: string, syncCode: string): Promise<void> {
+async function runSync(jobId: string, syncCode: string, userId: string): Promise<void> {
   try {
     const total = await baseTotal();
     await updateJob(jobId, { status: "running", total });
@@ -101,8 +103,8 @@ async function runSync(jobId: string, syncCode: string): Promise<void> {
     let offset = 0;
     let processed = 0;
 
+    // 阶段1: 复制富内容 —— 调用 victor_copy_batch, 把底座四表整份复制到用户私有 uw_* 四表
     // 最多 100 批 (2 万词上限), 防止异常死循环
-    // v1.24.0: 调用 victor_copy_batch, 把底座四表整份复制到用户私有 uw_* 四表
     for (let i = 0; i < 100; i++) {
       const res = await rpc("victor_copy_batch", { p_sync_code: syncCode, p_offset: offset, p_limit: BATCH });
       const row = Array.isArray(res) ? res[0] : res;
@@ -113,7 +115,17 @@ async function runSync(jobId: string, syncCode: string): Promise<void> {
       if (done < BATCH) break; // 最后一批
     }
 
-    await updateJob(jobId, { status: "done", processed, added: processed, enriched: 0 });
+    // 阶段2: 把底座独有的词补进用户自己的 words 表 (清单扩充, v1.25.0)
+    let addedWords = 0;
+    if (userId) {
+      const res2 = await rpc("victor_add_user_words", { p_user_id: userId });
+      const row2 = Array.isArray(res2) ? res2[0] : res2;
+      addedWords = Number(row2?.inserted || 0);
+    }
+
+    await updateJob(jobId, {
+      status: "done", processed, added: addedWords, enriched: processed,
+    });
   } catch (e) {
     await updateJob(jobId, { status: "failed", error: String(e?.message || e).slice(0, 500) });
   }
@@ -126,6 +138,7 @@ Deno.serve(async (req: Request) => {
   try {
     const body = await req.json().catch(() => ({}));
     const syncCode = String(body.syncCode || "").trim();
+    const userId = String(body.userId || "").trim();
     if (!syncCode) return json({ error: "缺少 syncCode" }, 400);
 
     // 防重复: 该用户已有 pending/running 任务则直接返回
@@ -143,7 +156,7 @@ Deno.serve(async (req: Request) => {
 
     // 服务端同步执行全程: 前端断开请求不影响已在服务端运行的函数;
     // 进度每批写库, 重进可查。await 保证函数不提前结束被回收。
-    await runSync(jobId, syncCode);
+    await runSync(jobId, syncCode, userId);
 
     return json({ jobId, status: "done" });
   } catch (e) {

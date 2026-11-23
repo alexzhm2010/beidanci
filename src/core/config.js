@@ -232,7 +232,8 @@ App.Utils = {
       '<button class="act-btn" type="button" tabindex="-1"><span class="ico">📍</span>进度</button>' +
       '</div>';
     return '<div class="word-card' + (isProgress ? ' is-progress' : '') + '"' +
-      ' id="wc-' + key + '" data-derived="' + (w.derived_from ? '1' : '0') + '">' +
+      ' id="wc-' + key + '" data-word-id="' + esc(w.id) + '"' +
+      ' data-derived="' + (w.derived_from ? '1' : '0') + '">' +
       '<div class="word-row"><div class="word-swipe">' +
         '<div class="word-hd" data-expandable="1" data-key="' + key + '" role="button" aria-expanded="false" tabindex="0">' +
           '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
@@ -250,7 +251,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.24.0',
+  APP_VERSION: '1.25.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

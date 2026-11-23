@@ -145,17 +145,42 @@ App.Library = (function () {
     listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
     isLoading = true;
     try {
-      // v1.24.0: 数据源改为 uw_* 四表嵌套查询 (Victor 结构化数据, 无快照)。
-      // 返回的词已是 Victor 词结构 (headword/senses/notes), 无需再映射 detail 快照。
-      allWords = await App.DB.getVictorWords();
-      // 补全渲染所需字段: chineseMeaning 供无义项回退, 熟练度 uw_* 无数据保持 0
-      allWords.forEach(function (w) {
-        if (!w.chineseMeaning && w.senses && w.senses.length) {
-          w.chineseMeaning = w.senses.map(function (s) { return s.chinese_def || ''; })
-            .filter(Boolean).join('；');
-        }
-        w.totalCount = w.totalCount || 0;
-        w.knownCount = w.knownCount || 0;
+      // v1.25.0 正确模型: 清单主体 = 用户自己的 words 表 (4034+ 词, 零丢失),
+      // 富内容 = Victor 四表(uw_*), 按小写词头 join 到用户词上。
+      // 匹配上 -> 完整 Victor 卡片; 匹配不上 -> 仅中文释义一行。
+      var userWords = await App.DB.getAllWords();
+      var richById = {};
+      try {
+        var richWords = await App.DB.getVictorWords();
+        richWords.forEach(function (r) {
+          var k = String(r.headword || '').trim().toLowerCase();
+          if (k && !richById[k]) richById[k] = r;
+        });
+      } catch (richErr) {
+        // 富内容拉取失败不应导致词库整体空白: 降级为全部只显示中文释义
+        if (window.console) console.warn('富内容加载失败, 降级为纯中文释义', richErr);
+      }
+
+      allWords = userWords.map(function (w) {
+        var key = String(w.word || '').trim().toLowerCase();
+        var rich = richById[key];
+        return {
+          id: w.id,
+          headword: w.word || '',
+          word: w.word || '',
+          phonetic: (w.phonetic || (rich && rich.phonetic) || ''),
+          chineseMeaning: w.chineseMeaning || '',
+          level_tag: rich ? rich.level_tag : '',
+          inline_def: rich ? rich.inline_def : '',
+          identity_tag: rich ? rich.identity_tag : '',
+          derived_from: rich ? rich.derived_from : '',
+          page_no: rich ? rich.page_no : null,
+          partial: rich ? !!rich.partial : false,
+          senses: rich ? rich.senses : [],
+          notes: rich ? rich.notes : [],
+          totalCount: w.totalCount || 0,
+          knownCount: w.knownCount || 0,
+        };
       });
       // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
       allWords.sort(function (a, b) {

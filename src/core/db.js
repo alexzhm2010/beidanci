@@ -1200,9 +1200,17 @@ App.DB = (function () {
 
   // ========== v1.21.0 Victor 词库后端同步 ==========
 
-  /** 触发后端同步任务: 把共享底座词库全量同步到当前用户私有词库 (服务端执行) */
+  /**
+   * 触发后端同步任务 (服务端执行):
+   *   1) 把 Victor 富内容整份复制到当前用户私有 uw_* 四表
+   *   2) 把 Victor 底座独有的词补进当前用户 words 表 (清单扩充), 需传 user_id
+   * v1.25.0: 增加 userId, 用于把独有词归属到当前登录用户
+   */
   async function syncVictor() {
-    return await callEdgeFunction('VICTOR_SYNC_URL', { syncCode: getSyncCode() });
+    return await callEdgeFunction('VICTOR_SYNC_URL', {
+      syncCode: getSyncCode(),
+      userId: getUserId(),
+    });
   }
 
   /** 查询最近一次 Victor 同步任务的进度/结果 (退出重进仍可查) */
