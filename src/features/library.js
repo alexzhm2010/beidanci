@@ -29,20 +29,8 @@ App.Library = (function () {
           <span id="libraryWordCount">共 0 词</span>
           <span id="librarySearchInfo"></span>
         </div>
-        <div class="word-table-container" id="wordTableContainer">
-          <table class="word-table">
-            <thead>
-              <tr>
-                <th>单词/词组</th>
-                <th>音标</th>
-                <th>中文释义</th>
-                <th>熟练度</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="wordTableBody"></tbody>
-          </table>
-        </div>
+        <!-- v1.22.0: 词库列表由表格改为 Victor 风格卡片 (词头+音标+释义+熟练度, 有富内容可展开) -->
+        <div class="word-card-list" id="wordCardList"></div>
         <div class="library-pagination" id="libraryPagination">
           <button class="btn btn-outline btn-sm" id="btnFirstPage" title="第一页">&laquo;</button>
           <button class="btn btn-outline btn-sm" id="btnPrevPage" title="上一页">&lsaquo; 上一页</button>
@@ -118,13 +106,14 @@ App.Library = (function () {
     document.getElementById('btnExport').addEventListener('click', showExportModal);
     document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
 
-    // 表格事件委托 (编辑)
-    document.getElementById('wordTableBody').addEventListener('click', function (e) {
-      var btn = e.target.closest('button');
-      if (!btn) return;
-      var row = btn.closest('tr');
-      var wordId = row.dataset.wordId;
-      if (btn.classList.contains('btn-edit')) editWord(wordId);
+    // v1.22.0: 卡片事件委托 — 点词头展开/收起富内容 (仅"有富内容"的卡片可展开)
+    document.getElementById('wordCardList').addEventListener('click', function (e) {
+      var head = e.target.closest('.vcard-head[data-expandable="1"]');
+      if (!head) return;
+      var card = head.closest('.vcard');
+      if (!card) return;
+      var open = card.classList.toggle('open');
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
 
     // 翻页按钮 (v1.11.2: 分页加载, 每页固定 30 条, 不再累加)
@@ -161,15 +150,15 @@ App.Library = (function () {
     if (page === currentPage) return;
     currentPage = page;
     await renderPage();
-    // 翻页后滚到表格顶部, 体验更自然
-    var container = document.querySelector('.word-table-container');
-    if (container) container.scrollTop = 0;
+    // 翻页后滚到列表顶部, 体验更自然
+    var container = document.getElementById('wordCardList');
+    if (container) container.parentNode.scrollTop = 0;
   }
 
   // 加载并渲染当前页 (currentPage), 每页固定 SEARCH_PAGE_SIZE 条
   async function renderPage() {
-    var tbody = document.getElementById('wordTableBody');
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-row">加载中...</td></tr>';
+    var listEl = document.getElementById('wordCardList');
+    listEl.innerHTML = '<div class="vcard-placeholder">加载中...</div>';
 
     isLoading = true;
     updatePagination(); // 加载中禁用所有翻页按钮
@@ -197,7 +186,7 @@ App.Library = (function () {
         }
       }
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-row">加载失败: ' + App.Utils.escapeHtml(e.message) + '</td></tr>';
+      listEl.innerHTML = '<div class="vcard-placeholder">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
       App.showToast('加载词库失败: ' + e.message, 'error');
     } finally {
       isLoading = false;
@@ -230,50 +219,68 @@ App.Library = (function () {
     btnLast.disabled = atLast || disabled;
   }
 
+  // v1.22.0: Victor 风格卡片列表 — 有富内容(detail)可展开, 无富内容显示一行中文释义
   function renderTable(words) {
-    var tbody = document.getElementById('wordTableBody');
+    var listEl = document.getElementById('wordCardList');
 
     if (!words || words.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-row">暂无单词数据，点击"单个新增"或"批量导入"添加单词</td></tr>';
+      listEl.innerHTML = '<div class="vcard-placeholder">暂无单词数据，点击"批量导入"或"同步 Victor"添加单词</div>';
       return;
     }
-    tbody.innerHTML = words.map(function (w) { return renderRow(w); }).join('');
+    listEl.innerHTML = words.map(function (w) { return renderCard(w); }).join('');
   }
 
-  function renderRow(w) {
+  function renderCard(w) {
     var esc = App.Utils.escapeHtml;
     var level = App.Algorithm.getProficiencyLevel(w);
     var proficiency = w.totalCount > 0
       ? Math.round((w.knownCount / w.totalCount) * 100) + '%'
       : '-';
+    var hasDetail = !!(w.detail && typeof w.detail === 'object' &&
+      ((Array.isArray(w.detail.senses) && w.detail.senses.length) ||
+       (Array.isArray(w.detail.notes) && w.detail.notes.length)));
 
+    // 词头: 箭头(可展开时) + 词名 + 音标 + 熟练度徽标
+    var head =
+      '<div class="vcard-head' + (hasDetail ? ' expandable' : '') + '"' +
+        (hasDetail ? ' data-expandable="1" aria-expanded="false" role="button" tabindex="0"' : '') + '>' +
+        (hasDetail ? '<svg class="vcard-arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' : '') +
+        '<span class="vcard-word">' + esc(w.word) + '</span>' +
+        (w.phonetic ? '<span class="vcard-ph">' + esc(w.phonetic) + '</span>' : '') +
+        '<span class="vcard-prof" style="background:' + level.color + '20;color:' + level.color + '">' +
+          level.label + ' ' + proficiency + '</span>' +
+      '</div>';
+
+    if (hasDetail) {
+      // 有富内容: 折叠详情, 默认收起
+      return '' +
+        '<div class="vcard' + (w.detail && w.detail.identity_tag ? ' vcard-tagged' : '') + '" data-word-id="' + esc(w.id) + '">' +
+          head +
+          '<div class="vcard-body">' + App.Utils.renderRichDetail(w.detail) + '</div>' +
+        '</div>';
+    }
+
+    // 无富内容: 单独一行中文释义 (不折叠)
     return '' +
-      '<tr data-word-id="' + esc(w.id) + '">' +
-        '<td class="col-word">' + esc(w.word) + '</td>' +
-        '<td class="col-phonetic">' + esc(w.phonetic) + '</td>' +
-        '<td class="col-meaning">' + esc(w.chineseMeaning) + '</td>' +
-        '<td class="col-proficiency">' +
-          '<span class="proficiency-badge" style="background:' + level.color + '20;color:' + level.color + '">' +
-            level.label + ' ' + proficiency + '</span>' +
-        '</td>' +
-        '<td class="col-actions">' +
-          '<button class="btn btn-outline btn-sm btn-edit">编辑</button>' +
-        '</td>' +
-      '</tr>';
+      '<div class="vcard" data-word-id="' + esc(w.id) + '">' +
+        head +
+        '<div class="vcard-plain-meaning">' +
+          (w.partOfSpeech ? '<span class="vcard-pos">' + esc(w.partOfSpeech) + '</span>' : '') +
+          esc(w.chineseMeaning) +
+        '</div>' +
+      '</div>';
   }
 
-  // v1.11.1 性能优化: 局部更新某一行 (编辑后), 避免全表 reload
-  // v1.11.2: 删除已改为整页 reload (分页下需重算页码), 仅保留编辑用的局部更新
+  // v1.11.1 性能优化: 局部更新某一卡片 (编辑后), 避免全表 reload
+  // v1.22.0: 表格改卡片, 直接整体替换卡片节点
   function updateRowInPlace(word) {
-    var row = document.querySelector('tr[data-word-id="' + CSS.escape(word.id) + '"]');
-    if (!row) return false;
-    var html = renderRow(word);
-    // extract inner <td>...</td> from new row, replace existing td's
-    var tmp = document.createElement('tbody');
-    tmp.innerHTML = html;
-    var newRow = tmp.firstElementChild;
-    if (newRow) {
-      row.innerHTML = newRow.innerHTML;
+    var oldCard = document.querySelector('.vcard[data-word-id="' + CSS.escape(word.id) + '"]');
+    if (!oldCard) return false;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = renderCard(word);
+    var newCard = tmp.firstElementChild;
+    if (newCard) {
+      oldCard.replaceWith(newCard);
     }
     return true;
   }

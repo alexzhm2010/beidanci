@@ -605,48 +605,9 @@ App.Learning = (function () {
     renderLetterStats();
   }
 
-  // v1.21.0: 渲染 Victor 富内容快照 (detail) 为紧凑卡片。所有字段转义, 防注入。
+  // v1.22.0: 富内容渲染已提取到 App.Utils.renderRichDetail (学习页/词库页共用)
   function renderRichDetail(detail, esc) {
-    if (!detail || typeof detail !== 'object') return '';
-    var html = '<div class="rich-detail">';
-    var senses = Array.isArray(detail.senses) ? detail.senses : [];
-    if (senses.length) {
-      html += '<ol class="rd-senses">';
-      senses.forEach(function (s) {
-        var freq = Number(s.sense_freq || 0);
-        var freqTag = freq === 1 ? '<span class="rd-freq">常考</span>' : '';
-        var tags = '';
-        if (s.countability) tags += '<span class="rd-tag">' + esc(s.countability) + '</span>';
-        if (s.usage_label) tags += '<span class="rd-tag">' + esc(s.usage_label) + '</span>';
-        if (s.antonym) tags += '<span class="rd-tag">反 ' + esc(s.antonym) + '</span>';
-        var examples = Array.isArray(s.examples) ? s.examples : [];
-        var exHtml = '';
-        examples.forEach(function (e) {
-          var kind = e.kind === 'phrase' ? '短语' : '例句';
-          exHtml += '<div class="rd-example"><span class="rd-kind">' + kind + '</span>' +
-            '<span class="rd-en">' + esc(e.en || '') + '</span>' +
-            (e.zh ? '<span class="rd-zh">' + esc(e.zh) + '</span>' : '') + '</div>';
-        });
-        html += '<li class="rd-sense">' +
-          (s.pos ? '<span class="rd-pos">' + esc(s.pos) + '</span>' : '') +
-          '<span class="rd-def">' + esc(s.chinese_def || '') + '</span>' +
-          freqTag + tags +
-          (s.english_def ? '<div class="rd-eng">' + esc(s.english_def) + '</div>' : '') +
-          exHtml + '</li>';
-      });
-      html += '</ol>';
-    }
-    var notes = Array.isArray(detail.notes) ? detail.notes : [];
-    notes.forEach(function (n) {
-      var lines = String(n.content || '').split(/\n+/).filter(Boolean).map(function (line) {
-        return '<div>' + esc(line) + '</div>';
-      }).join('');
-      html += '<div class="rd-note"><span class="rd-note-type">' + esc(n.note_type || '注') + '</span>' +
-        (n.title ? '<b>' + esc(n.title) + '</b>' : '') +
-        '<div class="rd-note-body">' + lines + '</div></div>';
-    });
-    html += '</div>';
-    return html;
+    return App.Utils.renderRichDetail(detail);
   }
 
   // ========== 渲染卡片 ==========

@@ -757,7 +757,8 @@ App.DB = (function () {
     var uid = getUserId();
     var qEnc = encodeURIComponent(q);
     var base = 'user_id=eq.' + encodeURIComponent(uid) +
-      '&select=id,word,phonetic,part_of_speech,chinese_meaning,total_count,known_count,created_at' +
+      // v1.22.0: 带出 detail 富内容快照, 供词库卡片展开显示 (无富内容的词该字段为 null)
+      '&select=id,word,phonetic,part_of_speech,chinese_meaning,total_count,known_count,created_at,detail' +
       '&order=created_at.desc' +
       '&limit=' + limit + '&offset=' + offset;
     if (q) {
