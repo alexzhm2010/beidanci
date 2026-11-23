@@ -345,6 +345,18 @@ App.initializeApp = async function () {
       await App.switchTab(lastTab);
     }
 
+    // v1.26.7: 后台预取词库数据进内存缓存, 用户首次点进「词库」即可 0 等待。
+    // 若当前就在词库页(switchTab 已加载过), prefetch 会因缓存命中自动跳过。
+    // 全程异步不阻塞, 失败静默降级(不影响任何功能)。
+    (async function () {
+      try {
+        await ensureFeature('library');
+        if (App.Library && typeof App.Library.prefetch === 'function') App.Library.prefetch();
+      } catch (e) {
+        if (window.console) console.warn('词库预取跳过', e);
+      }
+    })();
+
     console.log('背单词应用初始化完成 v' + App.Config.APP_VERSION);
   } catch (e) {
     console.error('初始化失败:', e);

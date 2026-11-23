@@ -70,6 +70,10 @@ App.Library = (function () {
   var PRELOAD_PX = 900;       // 预加载阈值(px): 距滚动容器底部还有这么多就提前加载下一批
   var _scrollHandler = null;
   var isLoading = false;
+  // v1.26.7 缓存: allWords 本身即内存缓存; 这两个标志控制首屏是否显示"加载中"
+  var _hasCache = false;       // 是否已有可用的内存缓存
+  var _refreshing = false;     // 后台静默刷新进行中
+  var _fetchToken = 0;         // 竞态令牌: 只接受最后一次取数的结果
 
   // Excel表头 → 字段名 映射
   var HEADER_MAP = {
@@ -182,9 +186,48 @@ App.Library = (function () {
 
 
   async function show() {
-    document.getElementById('searchInput').value = currentQuery;
-    // 每次进入词库页都重新拉全量, 保证与外部(同步/学习)改动一致
+    var input = document.getElementById('searchInput');
+    if (input) input.value = currentQuery;
+    // v1.26.7: 命中内存缓存 → 同步渲染(0等待), 再后台静默刷新保证数据新鲜
+    if (_hasCache && allWords && allWords.length) {
+      currentQuery = currentQuery || '';
+      resetWordList();              // 立即用缓存渲染, 无"加载中"
+      refreshInBackground();        // 后台静默刷新(不显示加载中, 不覆盖用户滚动)
+      return;
+    }
+    // 首次进入无缓存: 正常加载(显示加载中)
     await loadWords(currentQuery);
+  }
+
+  // 后台静默刷新: 拉取最新数据更新缓存, 但仅当列表内容变化时才重渲染, 避免打断用户滚动
+  function refreshInBackground() {
+    if (_refreshing || isLoading) return;
+    _refreshing = true;
+    var token = ++_fetchToken;
+    fetchAllWords().then(function (newAll) {
+      if (token !== _fetchToken) return;          // 已被更新的请求取代
+      allWords = newAll;
+      _hasCache = true;
+      // 内容指纹一致(词数/id/熟练度都相同) → 不重渲染, 保持滚动位置
+      if (_lastSignature && _lastSignature === signatureOf(newAll)) return;
+      resetWordList();
+    }).catch(function (e) {
+      if (window.console) console.warn('后台刷新词库失败(保留缓存)', e);
+    }).finally(function () {
+      _refreshing = false;
+    });
+  }
+
+  // 计算列表指纹: 仅当词条 id/熟练度/释义变化时才触发重渲染。
+  // v1.26.7: 必须全量覆盖每个词的熟练度(学习后任意词都可能变), 抽样会漏检。
+  // 全量字符串约几十 KB, 每页数毫秒, 可接受。
+  function signatureOf(words) {
+    var s = String(words.length);
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      s += '|' + w.id + ':' + w.knownCount + '/' + w.totalCount + ':' + (w.chineseMeaning || '').length;
+    }
+    return s;
   }
 
   // ========== 词间关系网 (v1.26.6: 复刻 Victor buildRelationGraph, 用词头匹配以适配 beidanci 的 id 体系) ==========
@@ -283,60 +326,79 @@ App.Library = (function () {
   // ========== 搜索 & 渲染 (v1.23.0: 复刻 Victor 全量 + A-Z + 无限滚动) ==========
 
   // 对外入口: 重新拉取全量词库并重建列表
+  // 取数 + 构建全量词表 (纯数据, 不碰 DOM)。v1.26.7 抽出供首屏加载/后台刷新/预取共用。
+  // v1.25.0 正确模型: 清单主体 = 用户自己的 words 表 (零丢失),
+  // 富内容 = Victor 四表(uw_*), 按小写词头 join 到用户词上。
+  async function fetchAllWords() {
+    // v1.26.7: 两个请求并行发出, 缩短首屏取数耗时
+    var userWordsPromise = App.DB.getAllWords();
+    var richPromise = App.DB.getVictorWords().catch(function (richErr) {
+      // 富内容拉取失败不应导致词库整体空白: 降级为全部只显示中文释义
+      if (window.console) console.warn('富内容加载失败, 降级为纯中文释义', richErr);
+      return [];
+    });
+    var userWords = await userWordsPromise;
+    var richWords = await richPromise;
+    var richById = {};
+    richWords.forEach(function (r) {
+      var k = String(r.headword || '').trim().toLowerCase();
+      if (k && !richById[k]) richById[k] = r;
+    });
+
+    var built = userWords.map(function (w) {
+      var key = String(w.word || '').trim().toLowerCase();
+      var rich = richById[key];
+      return {
+        id: w.id,
+        headword: w.word || '',
+        word: w.word || '',
+        phonetic: (w.phonetic || (rich && rich.phonetic) || ''),
+        chineseMeaning: w.chineseMeaning || '',
+        level_tag: rich ? rich.level_tag : '',
+        inline_def: rich ? rich.inline_def : '',
+        identity_tag: rich ? rich.identity_tag : '',
+        derived_from: rich ? rich.derived_from : '',
+        parent_word_id: rich ? rich.parent_word_id : null,
+        page_no: rich ? rich.page_no : null,
+        partial: rich ? !!rich.partial : false,
+        senses: rich ? rich.senses : [],
+        notes: rich ? rich.notes : [],
+        totalCount: w.totalCount || 0,
+        knownCount: w.knownCount || 0,
+      };
+    });
+    // 构建词间关系网并挂到每个词 (供关系 chips + 点击跳转)
+    buildRelationGraph(built);
+    built.forEach(function (w) { w.relations = relationsOf(w); });
+    // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
+    built.sort(function (a, b) {
+      var ka = String(a.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
+      var kb = String(b.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
+      var c = ka.localeCompare(kb);
+      return c !== 0 ? c : String(a.headword || '').localeCompare(String(b.headword || ''));
+    });
+    return built;
+  }
+
+  var _lastSignature = '';
+
   async function loadWords(query) {
     currentQuery = query || '';
+    var token = ++_fetchToken;
     var listEl = document.getElementById('wordCardList');
-    listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
+    // 有缓存时先同步渲染缓存, 消除"加载中"空白等待
+    if (_hasCache && allWords && allWords.length) {
+      resetWordList();
+    } else if (listEl) {
+      listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
+    }
     isLoading = true;
     try {
-      // v1.25.0 正确模型: 清单主体 = 用户自己的 words 表 (4034+ 词, 零丢失),
-      // 富内容 = Victor 四表(uw_*), 按小写词头 join 到用户词上。
-      // 匹配上 -> 完整 Victor 卡片; 匹配不上 -> 仅中文释义一行。
-      var userWords = await App.DB.getAllWords();
-      var richById = {};
-      try {
-        var richWords = await App.DB.getVictorWords();
-        richWords.forEach(function (r) {
-          var k = String(r.headword || '').trim().toLowerCase();
-          if (k && !richById[k]) richById[k] = r;
-        });
-      } catch (richErr) {
-        // 富内容拉取失败不应导致词库整体空白: 降级为全部只显示中文释义
-        if (window.console) console.warn('富内容加载失败, 降级为纯中文释义', richErr);
-      }
-
-      allWords = userWords.map(function (w) {
-        var key = String(w.word || '').trim().toLowerCase();
-        var rich = richById[key];
-        return {
-          id: w.id,
-          headword: w.word || '',
-          word: w.word || '',
-          phonetic: (w.phonetic || (rich && rich.phonetic) || ''),
-          chineseMeaning: w.chineseMeaning || '',
-          level_tag: rich ? rich.level_tag : '',
-          inline_def: rich ? rich.inline_def : '',
-          identity_tag: rich ? rich.identity_tag : '',
-          derived_from: rich ? rich.derived_from : '',
-          parent_word_id: rich ? rich.parent_word_id : null,
-          page_no: rich ? rich.page_no : null,
-          partial: rich ? !!rich.partial : false,
-          senses: rich ? rich.senses : [],
-          notes: rich ? rich.notes : [],
-          totalCount: w.totalCount || 0,
-          knownCount: w.knownCount || 0,
-        };
-      });
-      // v1.26.6: 构建词间关系网并挂到每个词 (供关系 chips + 点击跳转)
-      buildRelationGraph(allWords);
-      allWords.forEach(function (w) { w.relations = relationsOf(w); });
-      // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
-      allWords.sort(function (a, b) {
-        var ka = String(a.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
-        var kb = String(b.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
-        var c = ka.localeCompare(kb);
-        return c !== 0 ? c : String(a.headword || '').localeCompare(String(b.headword || ''));
-      });
+      var built = await fetchAllWords();
+      if (token !== _fetchToken) return;   // 竞态: 放弃过期结果
+      allWords = built;
+      _hasCache = true;
+      _lastSignature = signatureOf(built);
       resetWordList();
 
       // 搜索无结果且查询词非空: 自动弹出查词弹窗 (沿用 beidanci 行为)
@@ -346,16 +408,57 @@ App.Library = (function () {
         showWordModalWithCheck(term);
       }
     } catch (e) {
-      listEl.innerHTML = '<div class="vcard-placeholder">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
+      if (token !== _fetchToken) return;
+      if (listEl) listEl.innerHTML = '<div class="vcard-placeholder">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
       App.showToast('加载词库失败: ' + e.message, 'error');
     } finally {
-      isLoading = false;
+      if (token === _fetchToken) isLoading = false;
     }
   }
 
-  // 增删改后刷新: 重新拉全量并重建 (保持搜索词)
+  // 增删改后刷新: 强制重新拉全量并重建 (保持搜索词)
+  // v1.26.7: 作废缓存并直接取数重渲染, 不用旧缓存打底, 确保改动立即生效
   async function reloadCurrentPage() {
-    await loadWords(currentQuery);
+    var token = ++_fetchToken;
+    var listEl = document.getElementById('wordCardList');
+    if (listEl) listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
+    isLoading = true;
+    try {
+      var built = await fetchAllWords();
+      if (token !== _fetchToken) return;
+      allWords = built;
+      _hasCache = true;
+      _lastSignature = signatureOf(built);
+      resetWordList();
+    } catch (e) {
+      if (token !== _fetchToken) return;
+      if (listEl) listEl.innerHTML = '<div class="vcard-placeholder">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
+      App.showToast('加载词库失败: ' + e.message, 'error');
+    } finally {
+      if (token === _fetchToken) isLoading = false;
+    }
+  }
+
+  // v1.26.7: 供外部(如学习页答题/同步后)预热或作废旧缓存
+  function invalidateCache() {
+    _hasCache = false;
+    _lastSignature = '';
+  }
+  // 启动预取: 后台静默拉取词库进缓存, 用户首次点进词库即可 0 等待
+  function prefetch() {
+    if (_hasCache || _refreshing || isLoading) return;
+    _refreshing = true;
+    var token = ++_fetchToken;
+    fetchAllWords().then(function (built) {
+      if (token !== _fetchToken) return;
+      allWords = built;
+      _hasCache = true;
+      _lastSignature = signatureOf(built);
+    }).catch(function (e) {
+      if (window.console) console.warn('词库预取失败(不影响使用)', e);
+    }).finally(function () {
+      _refreshing = false;
+    });
   }
 
   // 依据搜索词过滤 (复刻 Victor computeFiltered: 英文词头 + 中文释义)
@@ -1600,6 +1703,8 @@ App.Library = (function () {
     loadWords: loadWords,
     toggleCard: toggleCard,
     jumpToWord: jumpToWord,
+    prefetch: prefetch,
+    invalidateCache: invalidateCache,
     buildRelationGraph: buildRelationGraph,
     relationsOf: relationsOf,
     normHw: normHw,
