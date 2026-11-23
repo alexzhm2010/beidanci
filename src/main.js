@@ -83,7 +83,10 @@ App.initAdminNav = function () {
     '<button class="nav-btn" data-tab="dictimport">词典导入</button>' +
     '<button class="nav-btn" data-tab="wordbook">词库</button>' +
     '<button class="nav-btn" data-tab="users">用户</button>' +
-    '<button class="nav-btn" data-tab="settings">设置</button>';
+    '<button class="nav-btn" data-tab="settings">设置</button>' +
+    '<button class="nav-btn" data-tab="bookscan">词书扫描</button>' +
+    '<button class="nav-btn" data-tab="bookwords">词书库</button>' +
+    '<button class="nav-btn" data-tab="bookrecords">录入记录</button>';
   nav.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       App.switchTab(btn.dataset.tab);
@@ -178,12 +181,46 @@ function showSkeletonInView(tabName) {
 }
 
 
+/**
+ * v1.19.0 词书模块: 给对应 iframe 注入 src 并加载 Victor 页面。
+ * - src 携带 beidanci 当前用户 uid (作为底层数据归属 code) 与目标 tab
+ * - 只在首次进入时设置 src, 避免重复重载; 用户切换 tab 由外层接管
+ */
+App.loadBookscanFrame = function (tabName) {
+  var view = document.getElementById('view-' + tabName);
+  if (!view) return;
+  var frame = view.querySelector('iframe.bookscan-frame');
+  if (!frame) return;
+  if (frame.getAttribute('src')) return; // 已加载过, 保留状态
+
+  var uid = '';
+  try { uid = App.DB.getUserId() || ''; } catch (e) {}
+  if (!uid) uid = 'anonymous';
+
+  // Victor 内部页名: 扫描=scan, 词库=words, 记录=records
+  var innerPage = tabName === 'bookscan' ? 'scan' : tabName === 'bookwords' ? 'words' : 'records';
+  var src = './bookscan/index.html?uid=' + encodeURIComponent(uid) + '&tab=' + innerPage;
+  frame.setAttribute('src', src);
+};
+
 App.switchTab = async function (tabName) {
   // v1.11.1 性能优化: 切换瞬间立即更新 nav active 态 (视觉反馈), 但不立即清空旧 view
   // 旧 view 保留显示直到新 view 内容就绪, 避免空白闪烁
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
   });
+
+  // v1.19.0: 词书模块三个 tab (扫描/词库/记录) — 所有登录用户可见, admin 也一样。
+  // 走独立的 iframe 容器, 不经过 admin / 普通用户的模块渲染分支。
+  var bookscanTabs = ['bookscan', 'bookwords', 'bookrecords'];
+  if (bookscanTabs.indexOf(tabName) !== -1) {
+    App.loadBookscanFrame(tabName);
+    localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
+    document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
+    var bv = document.getElementById('view-' + tabName);
+    if (bv) bv.classList.add('active');
+    return;
+  }
 
   // v1.10.0: admin 走专属四页, 复用 profile 容器
   if (App.isAdmin()) {
@@ -201,7 +238,7 @@ App.switchTab = async function (tabName) {
 
   // v1.10.0: 普通用户兜底 — lastTab 可能残留 admin 专属 tab (wordbook/users/settings),
   // 这些 view 不存在, 会致页面空白。非法 tab 统一回退到 learning
-  var validUserTabs = ['learning', 'library', 'stats', 'profile'];
+  var validUserTabs = ['learning', 'library', 'stats', 'profile', 'bookscan', 'bookwords', 'bookrecords'];
   if (validUserTabs.indexOf(tabName) === -1) tabName = 'learning';
 
   localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);

@@ -33,20 +33,37 @@ const HEADERS = {
 };
 
 function apiGet(url) {
-  const out = execFileSync('curl', ['-sS', '--max-time', '30', '-H', `Authorization: Bearer ${token}`,
-    '-H', 'Accept: application/vnd.github+json', '-H', 'User-Agent: beidanci-deploy-script', url],
-    { encoding: 'utf8' });
-  return JSON.parse(out);
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const out = execFileSync('curl', ['-sS', '--max-time', '60', '-H', `Authorization: Bearer ${token}`,
+        '-H', 'Accept: application/vnd.github+json', '-H', 'User-Agent: beidanci-deploy-script', url],
+        { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+      return JSON.parse(out);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 function apiWrite(url, method, payload) {
-  const args = ['-sS', '--max-time', '60', '-X', method, '-H', `Authorization: Bearer ${token}`,
+  const args = ['-sS', '--max-time', '120', '-X', method, '-H', `Authorization: Bearer ${token}`,
     '-H', 'Accept: application/vnd.github+json', '-H', 'Content-Type: application/json',
     '-H', 'User-Agent: beidanci-deploy-script'];
-  if (payload) args.push('-d', JSON.stringify(payload));
+  // 通过 stdin 传 JSON 而非命令行参数, 避免大文件(如 158KB 的 app.js)超过 ARG_MAX
+  let input;
+  if (payload) {
+    args.push('--data-binary', '@-');
+    input = JSON.stringify(payload);
+  }
   args.push(url);
-  const out = execFileSync('curl', args, { encoding: 'utf8' });
-  return out ? JSON.parse(out) : {};
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const out = execFileSync('curl', args, { encoding: 'utf8', input, maxBuffer: 32 * 1024 * 1024 });
+      return out ? JSON.parse(out) : {};
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 // ---- 校验版本号三处一致 ----

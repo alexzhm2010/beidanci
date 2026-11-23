@@ -434,3 +434,8 @@ input, textarea, select { font-family: inherit; outline: none; }
 @media (prefers-reduced-motion: reduce) {
   .skeleton-box { animation: none; background: #f0f0f0; }
 }
+
+/* v1.19.0 词书模块: iframe 容器撑满可用高度 */
+.view-frame { padding: 0; }
+.bookscan-frame { width: 100%; height: calc(100vh - 130px); min-height: 500px; border: 0; display: block; background: #f3f8fd; }
+@media (max-width: 768px) { .bookscan-frame { height: calc(100vh - 110px); min-height: 460px; } }
