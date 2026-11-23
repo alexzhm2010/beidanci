@@ -14,29 +14,25 @@ window.App = window.App || {};
 App.Library = (function () {
   // #view-library 的内部 HTML (迁移自 index.html, init() 首次挂载时注入)
   const HTML_TEMPLATE = `
-        <div class="library-toolbar">
-          <input type="text" id="searchInput" class="search-input" placeholder="搜索单词或中文释义...">
-          <div class="toolbar-buttons">
-            <button class="btn btn-outline" id="btnImport">批量导入</button>
-            <button class="btn btn-outline" id="btnAddWord" style="display:none;">单个新增</button>
-            <button class="btn btn-outline" id="btnScanWord">扫词加词</button>
-            <button class="btn btn-outline" id="btnSyncVictor">同步 Victor</button>
-            <button class="btn btn-outline" id="btnExport">导出备份</button>
-            <button class="btn btn-primary" id="btnSyncPreset">同步预置词库</button>
+        <!-- v1.23.0: 词库工具栏沿用 beidanci 功能按钮, 列表主体一比一复刻 Victor 词库页 -->
+        <div class="words-toolbar">
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+            <input type="text" id="searchInput" placeholder="搜索英文单词或中文释义…" autocomplete="off">
+            <div class="toolbar-buttons">
+              <button class="btn btn-outline btn-sm" id="btnImport">批量导入</button>
+              <button class="btn btn-outline btn-sm" id="btnAddWord" style="display:none;">单个新增</button>
+              <button class="btn btn-outline btn-sm" id="btnScanWord">扫词</button>
+              <button class="btn btn-outline btn-sm" id="btnSyncVictor">同步 Victor</button>
+              <button class="btn btn-outline btn-sm" id="btnExport">导出</button>
+              <button class="btn btn-primary btn-sm" id="btnSyncPreset">同步预置词库</button>
+            </div>
           </div>
+          <div class="list-summary" id="listSummary"><b>0</b><span class="frac-sep">/</span>0</div>
         </div>
-        <div class="library-info">
-          <span id="libraryWordCount">共 0 词</span>
-          <span id="librarySearchInfo"></span>
-        </div>
-        <!-- v1.22.1: 词库列表原样移植 Victor 词库卡片 (作用域 .victor-wordlist) -->
-        <div class="victor-wordlist" id="wordCardList"></div>
-        <div class="library-pagination" id="libraryPagination">
-          <button class="btn btn-outline btn-sm" id="btnFirstPage" title="第一页">&laquo;</button>
-          <button class="btn btn-outline btn-sm" id="btnPrevPage" title="上一页">&lsaquo; 上一页</button>
-          <span id="pageInfo" class="page-info">第 1 / 1 页</span>
-          <button class="btn btn-outline btn-sm" id="btnNextPage" title="下一页">下一页 &rsaquo;</button>
-          <button class="btn btn-outline btn-sm" id="btnLastPage" title="最后一页">&raquo;</button>
+        <div id="listView">
+          <div id="wordCardList" class="victor-wordlist book-list"></div>
+          <div id="scrollSentinel" class="scroll-sentinel"><span class="mini-spinner"></span> 加载更多…</div>
         </div>
       `;
 
@@ -67,10 +63,13 @@ App.Library = (function () {
     return _Tesseract;
   }
 
+  // v1.23.0: 一比一复刻 Victor 词库列表引擎 (全量加载 + A-Z 排序 + 无限滚动)
   var currentQuery = '';
-  var currentPage = 1;
-  var totalPages = 1;
-  var totalCount = 0;
+  var allWords = [];          // 当前用户词库全量词 (映射成 Victor 词对象结构)
+  var filteredWords = [];     // 搜索过滤后的列表
+  var renderedCount = 0;      // 已渲染条数
+  var PAGE_RENDER = 30;       // 每批渲染词条数 (与 Victor 一致)
+  var _sentinelObserver = null;
   var isLoading = false;
 
   // Excel表头 → 字段名 映射
@@ -91,11 +90,11 @@ App.Library = (function () {
       view.dataset.mounted = '1';
     }
 
-    // 搜索 (防抖) — 搜索时重置到第一页
+    // 搜索 (防抖) — 复刻 Victor onSearchChange, 本地过滤后重建列表
     var debouncedSearch = App.Utils.debounce(function () {
-      currentPage = 1;
-      loadWords(document.getElementById('searchInput').value);
-    }, 800);
+      currentQuery = document.getElementById('searchInput').value || '';
+      resetWordList();
+    }, 180);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
     // 工具栏按钮
@@ -106,131 +105,172 @@ App.Library = (function () {
     document.getElementById('btnExport').addEventListener('click', showExportModal);
     document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
 
-    // v1.22.1: 卡片事件委托 — 点词头展开/收起富内容 (复刻 Victor toggleCard)
+    // 事件委托: 点词头展开/收起 (复刻 Victor toggleCard; 所有词卡均可展开)
     document.getElementById('wordCardList').addEventListener('click', function (e) {
       var head = e.target.closest('.word-hd[data-expandable="1"]');
-      if (!head) return;
-      var card = head.closest('.word-card');
-      if (!card) return;
-      var open = card.classList.toggle('open');
-      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (head) toggleCard(head.getAttribute('data-key'));
     });
+    // 键盘可达: 词头回车/空格展开
+    document.getElementById('wordCardList').addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      var head = e.target.closest('.word-hd[data-expandable="1"]');
+      if (!head) return;
+      e.preventDefault();
+      toggleCard(head.getAttribute('data-key'));
+    });
+  }
 
-    // 翻页按钮 (v1.11.2: 分页加载, 每页固定 30 条, 不再累加)
-    document.getElementById('btnFirstPage').addEventListener('click', function () { goToPage(1); });
-    document.getElementById('btnPrevPage').addEventListener('click', function () { goToPage(currentPage - 1); });
-    document.getElementById('btnNextPage').addEventListener('click', function () { goToPage(currentPage + 1); });
-    document.getElementById('btnLastPage').addEventListener('click', function () { goToPage(totalPages); });
+  // v1.23.0: 复刻 Victor toggleCard —— 点击词头展开/收起 word-body
+  function toggleCard(key) {
+    var card = document.getElementById('wc-' + key);
+    if (!card) return;
+    var open = card.classList.toggle('open');
+    var head = card.querySelector('.word-hd');
+    if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
 
   async function show() {
     document.getElementById('searchInput').value = currentQuery;
+    // 每次进入词库页都重新拉全量, 保证与外部(同步/学习)改动一致
     await loadWords(currentQuery);
   }
 
-  // ========== 搜索 & 渲染 ==========
+  // ========== 搜索 & 渲染 (v1.23.0: 复刻 Victor 全量 + A-Z + 无限滚动) ==========
 
+  // 对外入口: 重新拉取全量词库并重建列表
   async function loadWords(query) {
     currentQuery = query || '';
-    currentPage = 1;
-    await renderPage();
-  }
-
-  // 刷新当前页 (不重置页码): 增删改后保持用户所在页
-  // 删除后当前页可能变空, renderPage 内部会自动回退到有效页
-  async function reloadCurrentPage() {
-    await renderPage();
-  }
-
-  // 翻页: 边界由 updatePagination 保证, 这里只负责加载目标页
-  async function goToPage(page) {
-    if (isLoading) return;
-    page = Math.max(1, Math.min(page, totalPages));
-    if (page === currentPage) return;
-    currentPage = page;
-    await renderPage();
-    // 翻页后滚到列表顶部, 体验更自然
-    var container = document.getElementById('wordCardList');
-    if (container) container.parentNode.scrollTop = 0;
-  }
-
-  // 加载并渲染当前页 (currentPage), 每页固定 SEARCH_PAGE_SIZE 条
-  async function renderPage() {
     var listEl = document.getElementById('wordCardList');
-    listEl.innerHTML = '<div class="vcard-placeholder">加载中...</div>';
-
+    listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
     isLoading = true;
-    updatePagination(); // 加载中禁用所有翻页按钮
     try {
-      var offset = (currentPage - 1) * App.Config.SEARCH_PAGE_SIZE;
-      var result = await App.DB.searchWords(currentQuery, offset, App.Config.SEARCH_PAGE_SIZE);
-      totalCount = result.total;
-      totalPages = totalCount > 0 ? Math.ceil(totalCount / App.Config.SEARCH_PAGE_SIZE) : 1;
-      // 越界修正: 删除单词后当前页可能为空, 回退到上一页
-      if (result.words.length === 0 && currentPage > 1) {
-        currentPage = totalPages;
-        return renderPage();
-      }
-      renderTable(result.words);
-      updateInfo();
-      updatePagination();
+      var words = await App.DB.getAllWords();
+      // 映射成 Victor 词对象 (headword/senses/notes/tags 等), 供 wordCardHtml 直接使用
+      allWords = words.map(toVictorWord);
+      // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
+      allWords.sort(function (a, b) {
+        var ka = String(a.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
+        var kb = String(b.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
+        var c = ka.localeCompare(kb);
+        return c !== 0 ? c : String(a.headword || '').localeCompare(String(b.headword || ''));
+      });
+      resetWordList();
 
-      // 搜索无结果且查询词非空: 自动弹出新增弹窗
-      if (result.words.length === 0 && currentQuery.trim()) {
-        var searchTerm = currentQuery.trim();
-        // 判断是否像英文单词 (含字母)
-        if (/[a-zA-Z]/.test(searchTerm)) {
-          App.showToast('词库中未找到"' + searchTerm + '"，正在为您查词...', 'info', 3000);
-          showWordModalWithCheck(searchTerm);
-        }
+      // 搜索无结果且查询词非空: 自动弹出查词弹窗 (沿用 beidanci 行为)
+      if (filteredWords.length === 0 && currentQuery.trim() && /[a-zA-Z]/.test(currentQuery.trim())) {
+        var term = currentQuery.trim();
+        App.showToast('词库中未找到"' + term + '"，正在为您查词...', 'info', 3000);
+        showWordModalWithCheck(term);
       }
     } catch (e) {
       listEl.innerHTML = '<div class="vcard-placeholder">加载失败: ' + App.Utils.escapeHtml(e.message) + '</div>';
       App.showToast('加载词库失败: ' + e.message, 'error');
     } finally {
       isLoading = false;
-      updatePagination();
     }
   }
 
-  function updateInfo() {
-    var info = document.getElementById('libraryWordCount');
-    var searchInfo = document.getElementById('librarySearchInfo');
-    info.textContent = '共 ' + totalCount + ' 词';
-    searchInfo.textContent = currentQuery ? '搜索: "' + currentQuery + '"' : '按添加时间排序';
+  // 增删改后刷新: 重新拉全量并重建 (保持搜索词)
+  async function reloadCurrentPage() {
+    await loadWords(currentQuery);
   }
 
-  // 翻页按钮可用状态 + 页码显示
-  function updatePagination() {
-    var pageInfo = document.getElementById('pageInfo');
-    var btnFirst = document.getElementById('btnFirstPage');
-    var btnPrev = document.getElementById('btnPrevPage');
-    var btnNext = document.getElementById('btnNextPage');
-    var btnLast = document.getElementById('btnLastPage');
-    if (!pageInfo) return;
-    pageInfo.textContent = '第 ' + currentPage + ' / ' + totalPages + ' 页';
-    var atFirst = currentPage <= 1;
-    var atLast = currentPage >= totalPages;
-    var disabled = isLoading;
-    btnFirst.disabled = atFirst || disabled;
-    btnPrev.disabled = atFirst || disabled;
-    btnNext.disabled = atLast || disabled;
-    btnLast.disabled = atLast || disabled;
+  // 把 beidanci 词对象映射成 Victor 词库页所用的结构
+  function toVictorWord(w) {
+    return {
+      id: w.id,
+      headword: w.word || '',
+      phonetic: w.phonetic || '',
+      chineseMeaning: w.chineseMeaning || '',
+      partOfSpeech: w.partOfSpeech || '',
+      exampleSentence: w.exampleSentence || '',
+      totalCount: w.totalCount || 0,
+      knownCount: w.knownCount || 0,
+      detail: w.detail || null,
+    };
   }
 
-  // v1.22.0: Victor 风格卡片列表 — 有富内容(detail)可展开, 无富内容显示一行中文释义
-  function renderTable(words) {
-    var listEl = document.getElementById('wordCardList');
+  // 依据搜索词过滤 (复刻 Victor computeFiltered: 英文词头 + 中文释义)
+  function computeFiltered() {
+    var q = (currentQuery || '').trim().toLowerCase();
+    if (!q) return allWords;
+    return allWords.filter(function (w) {
+      if ((w.headword || '').toLowerCase().indexOf(q) !== -1) return true;
+      if ((w.chineseMeaning || '').indexOf(q) !== -1) return true;
+      // 富内容: 义项中文释义 / 例句英文
+      var d = w.detail;
+      if (d && typeof d === 'object') {
+        var senses = Array.isArray(d.senses) ? d.senses : [];
+        for (var i = 0; i < senses.length; i++) {
+          if ((senses[i].chinese_def || '').indexOf(q) !== -1) return true;
+          var exs = Array.isArray(senses[i].examples) ? senses[i].examples : [];
+          for (var j = 0; j < exs.length; j++) {
+            if ((exs[j].en || '').toLowerCase().indexOf(q) !== -1) return true;
+          }
+        }
+      }
+      return false;
+    });
+  }
 
-    if (!words || words.length === 0) {
-      listEl.innerHTML = '<div class="vcard-placeholder">暂无单词数据，点击"批量导入"或"同步 Victor"添加单词</div>';
+  // 重新计算并从头渲染 (复刻 Victor resetWordList)
+  function resetWordList() {
+    filteredWords = computeFiltered();
+    renderedCount = 0;
+    var host = document.getElementById('wordCardList');
+    host.innerHTML = '';
+    var q = (currentQuery || '').trim();
+    // 分数形式: 分子=过滤后数量, 分母=全部数量 (与 Victor listSummary 一致)
+    var summary = document.getElementById('listSummary');
+    if (summary) summary.innerHTML = '<b>' + filteredWords.length + '</b><span class="frac-sep">/</span>' + allWords.length;
+    var sentinel = document.getElementById('scrollSentinel');
+    if (!filteredWords.length) {
+      sentinel.classList.add('hidden');
+      host.innerHTML = '<div class="empty">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' +
+        '<div>' + (q ? '没有匹配的单词' : '词库为空，点击"批量导入"或"同步 Victor"添加单词') + '</div></div>';
       return;
     }
-    listEl.innerHTML = words.map(function (w) { return renderCard(w); }).join('');
+    sentinel.classList.remove('hidden');
+    appendWords();
+    setupSentinelObserver();
   }
 
-  // v1.22.1: 原样移植 Victor 词库卡片结构 (公共函数), 有富内容可展开, 无则词头灰字显示释义
+  // 追加下一批词条 (复刻 Victor appendWords)
+  function appendWords() {
+    if (renderedCount >= filteredWords.length) {
+      var s0 = document.getElementById('scrollSentinel');
+      if (s0) s0.classList.add('hidden');
+      return;
+    }
+    var batch = filteredWords.slice(renderedCount, renderedCount + PAGE_RENDER);
+    var host = document.getElementById('wordCardList');
+    host.insertAdjacentHTML('beforeend', batch.map(function (w, k) {
+      return renderCard(w);
+    }).join(''));
+    renderedCount += batch.length;
+    var sentinel = document.getElementById('scrollSentinel');
+    if (renderedCount >= filteredWords.length) {
+      sentinel.textContent = '— 已显示全部 ' + filteredWords.length + ' 词 —';
+    } else {
+      sentinel.innerHTML = '<span class="mini-spinner"></span> 加载更多…';
+    }
+  }
+
+  // 滚动到底自动加载 (复刻 Victor setupSentinelObserver; root 以词库滚动容器为准)
+  function setupSentinelObserver() {
+    if (_sentinelObserver) { _sentinelObserver.disconnect(); _sentinelObserver = null; }
+    if (typeof IntersectionObserver === 'undefined') return;
+    var sentinel = document.getElementById('scrollSentinel');
+    var scroller = document.getElementById('wordCardList');
+    _sentinelObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) { if (en.isIntersecting) appendWords(); });
+    }, { root: scroller, rootMargin: '200px' });
+    _sentinelObserver.observe(sentinel);
+  }
+
+  // 渲染单词卡片 (委托到公共渲染函数)
   function renderCard(w) {
     return App.Utils.renderVictorCard(w);
   }
@@ -1165,7 +1205,7 @@ App.Library = (function () {
       try {
         await App.DB.deleteWord(wordId);
         App.showToast('删除成功', 'success');
-        // v1.11.2 分页: 删除后刷新当前页 (renderPage 会修正越界), 不重置页码
+        // v1.23.0: 删除后重新拉全量并重建列表
         await reloadCurrentPage();
       } catch (e) {
         App.showToast('删除失败: ' + e.message, 'error');
@@ -1390,6 +1430,7 @@ App.Library = (function () {
     init: init,
     show: show,
     loadWords: loadWords,
+    toggleCard: toggleCard,
   };
 })();
 

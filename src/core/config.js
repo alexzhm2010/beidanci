@@ -215,18 +215,21 @@ App.Utils = {
       ? Math.round((w.knownCount / w.totalCount) * 100) + '%' : '-';
     var profTag = '<span class="study-tag custom" title="熟练度">' + esc(level.label + ' ' + profText) + '</span>';
 
-    var hasRich = sensesHtml || notesHtml;
-    var bodyHtml = hasRich
+    // v1.23.0: 一比一复刻 Victor wordCardHtml —— 所有词卡都可点击展开,
+    // 不再按 hasRich 区分 data-expandable。无富快照时 body 显示一行中文释义。
+    var bodyHtml = (sensesHtml || notesHtml)
       ? (sensesHtml + notesHtml)
-      : '<div style="font-size:13px;color:var(--muted);padding:8px 0">（无详细义项）</div>';
+      : '<div style="font-size:13px;color:var(--muted);padding:8px 0">' +
+          (w.chineseMeaning ? esc(w.chineseMeaning) : '（无详细义项）') + '</div>';
 
     var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.word));
-    return '<div class="word-card' + (detail.identity_tag ? ' vcard-tagged' : '') + '"' +
+    var isProgress = w.totalCount > 0 && (w.knownCount / w.totalCount) >= 0.8;
+    return '<div class="word-card' + (isProgress ? ' is-progress' : '') + '"' +
       ' id="wc-' + key + '" data-word-id="' + esc(w.id) + '"' +
       ' data-derived="' + (detail.derived_from ? '1' : '0') + '">' +
       '<div class="word-row"><div class="word-swipe">' +
-        '<div class="word-hd"' + (hasRich ? ' data-expandable="1" role="button" aria-expanded="false" tabindex="0"' : '') + '>' +
-          (hasRich ? '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' : '') +
+        '<div class="word-hd" data-expandable="1" data-key="' + key + '" role="button" aria-expanded="false" tabindex="0">' +
+          '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
           '<span class="word-name">' + esc(w.word) + '</span>' +
           '<span class="word-ph">' + esc(w.phonetic || '') + '</span>' +
           profTag + identityTag + derivedTag + page + partialTag +
@@ -241,7 +244,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.22.1',
+  APP_VERSION: '1.23.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
