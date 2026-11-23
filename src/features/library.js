@@ -68,8 +68,9 @@ App.Library = (function () {
   var allWords = [];          // 当前用户词库全量词 (映射成 Victor 词对象结构)
   var filteredWords = [];     // 搜索过滤后的列表
   var renderedCount = 0;      // 已渲染条数
-  var PAGE_RENDER = 30;       // 每批渲染词条数 (与 Victor 一致)
-  var _sentinelObserver = null;
+  var PAGE_RENDER = 40;       // 每批渲染词条数 (Victor 30 → 加大, 减少"加载更多"出现次数)
+  var PRELOAD_PX = 900;       // 预加载阈值(px): 距滚动容器底部还有这么多就提前加载下一批
+  var _scrollHandler = null;
   var isLoading = false;
 
   // Excel表头 → 字段名 映射
@@ -250,7 +251,7 @@ App.Library = (function () {
     }
     sentinel.classList.remove('hidden');
     appendWords();
-    setupSentinelObserver();
+    setupAutoLoad();
   }
 
   // 追加下一批词条 (复刻 Victor appendWords)
@@ -274,16 +275,25 @@ App.Library = (function () {
     }
   }
 
-  // 滚动到底自动加载 (复刻 Victor setupSentinelObserver; root 以词库滚动容器为准)
-  function setupSentinelObserver() {
-    if (_sentinelObserver) { _sentinelObserver.disconnect(); _sentinelObserver = null; }
-    if (typeof IntersectionObserver === 'undefined') return;
-    var sentinel = document.getElementById('scrollSentinel');
+  // 滚动预加载 (v1.26.1): 原实现用 IntersectionObserver(root=wordCardList) 观察哨兵,
+  // 但哨兵是容器外的兄弟节点, 交叉判定永远不成立 → 滚到底不加载, "加载更多…"一直转。
+  // 改为监听滚动容器的 scroll 事件, 按"距底部剩余高度"精确预加载, 更快更丝滑。
+  function setupAutoLoad() {
     var scroller = document.getElementById('wordCardList');
-    _sentinelObserver = new IntersectionObserver(function (entries) {
-      entries.forEach(function (en) { if (en.isIntersecting) appendWords(); });
-    }, { root: scroller, rootMargin: '200px' });
-    _sentinelObserver.observe(sentinel);
+    if (!scroller) return;
+    if (_scrollHandler) scroller.removeEventListener('scroll', _scrollHandler);
+    _scrollHandler = function () {
+      // 连续补载: 直到预加载距离被填满, 或已全部渲染
+      var guard = 0;
+      while (renderedCount < filteredWords.length && guard++ < 12) {
+        var remain = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        if (remain > PRELOAD_PX) break;
+        appendWords();
+      }
+    };
+    scroller.addEventListener('scroll', _scrollHandler, { passive: true });
+    // 首屏预填充: 内容不足一屏时直接补满, 避免一进来就卡着"加载更多…"
+    _scrollHandler();
   }
 
   // 渲染单词卡片 (委托到公共渲染函数)
