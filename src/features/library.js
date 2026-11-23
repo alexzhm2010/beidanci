@@ -32,7 +32,6 @@ App.Library = (function () {
         </div>
         <div id="listView">
           <div id="wordCardList" class="victor-wordlist book-list"></div>
-          <div id="scrollSentinel" class="scroll-sentinel"><span class="mini-spinner"></span> 加载更多…</div>
         </div>
       `;
 
@@ -241,43 +240,29 @@ App.Library = (function () {
     // 分数形式: 分子=过滤后数量, 分母=全部数量 (与 Victor listSummary 一致)
     var summary = document.getElementById('listSummary');
     if (summary) summary.innerHTML = '<b>' + filteredWords.length + '</b><span class="frac-sep">/</span>' + allWords.length;
-    var sentinel = document.getElementById('scrollSentinel');
     if (!filteredWords.length) {
-      sentinel.classList.add('hidden');
       host.innerHTML = '<div class="empty">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' +
         '<div>' + (q ? '没有匹配的单词' : '词库为空，点击"批量导入"或"同步 Victor"添加单词') + '</div></div>';
       return;
     }
-    sentinel.classList.remove('hidden');
     appendWords();
     setupAutoLoad();
   }
 
   // 追加下一批词条 (复刻 Victor appendWords)
   function appendWords() {
-    if (renderedCount >= filteredWords.length) {
-      var s0 = document.getElementById('scrollSentinel');
-      if (s0) s0.classList.add('hidden');
-      return;
-    }
+    if (renderedCount >= filteredWords.length) return;
     var batch = filteredWords.slice(renderedCount, renderedCount + PAGE_RENDER);
     var host = document.getElementById('wordCardList');
     host.insertAdjacentHTML('beforeend', batch.map(function (w, k) {
       return renderCard(w);
     }).join(''));
     renderedCount += batch.length;
-    var sentinel = document.getElementById('scrollSentinel');
-    if (renderedCount >= filteredWords.length) {
-      sentinel.textContent = '— 已显示全部 ' + filteredWords.length + ' 词 —';
-    } else {
-      sentinel.innerHTML = '<span class="mini-spinner"></span> 加载更多…';
-    }
   }
 
-  // 滚动预加载 (v1.26.1): 原实现用 IntersectionObserver(root=wordCardList) 观察哨兵,
-  // 但哨兵是容器外的兄弟节点, 交叉判定永远不成立 → 滚到底不加载, "加载更多…"一直转。
-  // 改为监听滚动容器的 scroll 事件, 按"距底部剩余高度"精确预加载, 更快更丝滑。
+  // 滚动预加载 (v1.26.1): 监听滚动容器的 scroll 事件, 按"距底部剩余高度"精确预加载,
+  // 提前填满预加载区, 无需"加载更多"提示条, 滚动到底无感续载, 更快更丝滑。
   function setupAutoLoad() {
     var scroller = document.getElementById('wordCardList');
     if (!scroller) return;
@@ -292,7 +277,7 @@ App.Library = (function () {
       }
     };
     scroller.addEventListener('scroll', _scrollHandler, { passive: true });
-    // 首屏预填充: 内容不足一屏时直接补满, 避免一进来就卡着"加载更多…"
+    // 首屏预填充: 内容不足一屏时直接补满, 滚动全程无感续载
     _scrollHandler();
   }
 

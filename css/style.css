@@ -485,12 +485,6 @@ input, textarea, select { font-family: inherit; outline: none; }
 .list-summary{font-size:13px;color:var(--muted);white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums}
 .list-summary b{color:var(--primary-d);font-size:17px;font-weight:800}
 .list-summary .frac-sep{color:#b9c0cc;margin:0 2px;font-size:14px}
-/* 无限滚动哨兵 */
-.scroll-sentinel{text-align:center;color:var(--muted);font-size:12px;padding:14px 0 4px;min-height:20px}
-.scroll-sentinel.hidden{display:none}
-.mini-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d8b4fe;border-top-color:transparent;
-  border-radius:50%;vertical-align:-1px;margin-right:4px;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
 .victor-wordlist .empty{text-align:center;padding:50px 20px;color:var(--muted)}
 .victor-wordlist .empty svg{width:54px;height:54px;stroke:#c3ccda;margin-bottom:12px}
 /* 词条：词头一行（深蓝加粗）+ 音标斜体（压紧排版） */
