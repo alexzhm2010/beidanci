@@ -68,6 +68,24 @@ App.updateSyncCodeBadge = function () {
   document.getElementById('syncCodeBadge').textContent = '用户名: ' + code + '  |  v' + ver;
 };
 
+// v1.26.4: 测量页眉/顶部导航高度, 供搜索栏 sticky 吸顶偏移使用。
+//   --header-h  : 页眉高度 (.app-nav 桌面端吸顶位置 = 页眉下方)
+//   --sticky-top: 搜索栏吸顶偏移 = 页眉 + (桌面端导航条高度; 移动端导航在底部, 计 0)
+// 页眉改为 sticky 后始终可见, 搜索栏吸在其下方, 不再遮挡页眉。
+App.updateStickyOffsets = function () {
+  var header = document.querySelector('.app-header');
+  var nav = document.querySelector('.app-nav');
+  if (!header) return;
+  var headerH = header.offsetHeight || 0;
+  document.documentElement.style.setProperty('--header-h', headerH + 'px');
+  var navH = 0;
+  // 只有桌面端导航条才是顶部 sticky; 移动端是 fixed 底栏, 不占顶部空间
+  if (nav && window.getComputedStyle(nav).position === 'sticky') {
+    navH = nav.offsetHeight || 0;
+  }
+  document.documentElement.style.setProperty('--sticky-top', (headerH + navH) + 'px');
+};
+
 // v1.10.0 admin 身份判断 (复用 auth.js 的 ADMIN_CODE 识别)
 App.isAdmin = function () {
   var username = App.Auth.getCurrentUser();
@@ -576,6 +594,11 @@ document.addEventListener('DOMContentLoaded', function () {
   } else {
     App.initializeApp();
   }
+
+  // v1.26.4: 吸顶偏移测量 (页眉+导航高度), 首屏 + 布局变化时重算
+  App.updateStickyOffsets();
+  window.addEventListener('resize', function () { App.updateStickyOffsets(); });
+  window.addEventListener('load', function () { App.updateStickyOffsets(); });
 
   // v1.11.1 性能优化: 空闲时间后台预取其他 tab 的 chunk
   // 在首屏初始化完成后 (Auth.init 是 async, 不阻塞), 利用 idle 时机把常用 chunk 拉到浏览器缓存
