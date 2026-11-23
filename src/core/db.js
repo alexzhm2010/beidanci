@@ -825,9 +825,46 @@ App.DB = (function () {
     }, 300, 5);
   }
 
+  /**
+   * 批内去重 (v1.26.0): 按「精确词头」合并同源多行。
+   * 词表源文件常把一个多义词拆成多行(不同义项), 如 fall=秋季 / fall=落下。
+   * 合并策略: 释义用 '；' 拼接去重; 音标/词性/例句取首个非空; 保留首行其余字段。
+   * 注意: 精确词头大小写敏感, AD/ad、March/march 视为不同词, 不会被合并。
+   */
+  function dedupeImportWords(words) {
+    var map = Object.create(null);
+    var order = [];
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      var key = String(w.word || '').trim();
+      if (!key) continue;
+      if (!map[key]) {
+        var copy = {};
+        for (var k in w) if (Object.prototype.hasOwnProperty.call(w, k)) copy[k] = w[k];
+        copy.word = key;
+        map[key] = copy;
+        order.push(key);
+      } else {
+        var m = map[key];
+        // 释义拼接去重
+        var mh = String(m.chineseMeaning || '').trim();
+        var wh = String(w.chineseMeaning || '').trim();
+        if (wh && mh.indexOf(wh) === -1) m.chineseMeaning = mh ? (mh + '；' + wh) : wh;
+        // 音标/词性/例句取首个非空
+        if (!m.phonetic && w.phonetic) m.phonetic = w.phonetic;
+        if (!m.partOfSpeech && w.partOfSpeech) m.partOfSpeech = w.partOfSpeech;
+        if (!m.exampleSentence && w.exampleSentence) m.exampleSentence = w.exampleSentence;
+      }
+    }
+    return order.map(function (key) { return map[key]; });
+  }
+
   /** 批量导入: mode = 'overwrite' | 'incremental' */
   async function addWordsBatch(words, mode) {
     var uid = getUserId();
+
+    // v1.26.0: 批内先按精确词头去重, 从源头杜绝一词多行
+    words = dedupeImportWords(words || []);
 
     if (mode === 'overwrite') {
       // clear_user_data 现基于 auth.uid() (RPC 内部取 JWT uid, 不再传 sync_code)
@@ -846,7 +883,9 @@ App.DB = (function () {
           '&order=created_at.asc&limit=' + PAGE + '&offset=' + offset);
         if (!rows || rows.length === 0) break;
         for (var r = 0; r < rows.length; r++) {
-          existingMap[rows[r].word.toLowerCase()] = rows[r];
+          // v1.26.0: 精确词头(大小写敏感), 与唯一索引 & 批内去重口径一致,
+          // 避免把 AD/ad、March/march 误判为同一词
+          existingMap[rows[r].word] = rows[r];
         }
         if (rows.length < PAGE) break;
         offset += PAGE;
@@ -854,7 +893,7 @@ App.DB = (function () {
     }
 
     var rowsToWrite = words.map(function (w) {
-      var key = (w.word || '').toLowerCase();
+      var key = String(w.word || '').trim();  // v1.26.0: 精确词头
       var old = existingMap[key];
       if (old) {
         return {
@@ -880,13 +919,24 @@ App.DB = (function () {
       return wordToRow(w);
     });
 
+    // v1.26.0: 二次保险 —— rowsToWrite 内再做一次精确词头去重(理论上批内已处理),
+    // 防止 existingMap 命中导致多条 row 复用同一 id 之外的边界情况
+    var seenIds = Object.create(null);
+    var finalRows = [];
+    for (var j = 0; j < rowsToWrite.length; j++) {
+      var k2 = rowsToWrite[j].word;
+      if (seenIds[k2]) continue;
+      seenIds[k2] = true;
+      finalRows.push(rowsToWrite[j]);
+    }
+
     var BATCH = 500;
-    for (var i = 0; i < rowsToWrite.length; i += BATCH) {
-      var batch = rowsToWrite.slice(i, i + BATCH);
+    for (var i = 0; i < finalRows.length; i += BATCH) {
+      var batch = finalRows.slice(i, i + BATCH);
       await api('POST', 'words', null, batch, { upsert: true });
     }
     invalidateCache(); // v1.11.1: 批量导入后失效读缓存
-    return rowsToWrite.length;
+    return finalRows.length;
   }
 
   // ========== 学习记录 ==========
