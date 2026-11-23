@@ -97,6 +97,8 @@ App.DB = (function () {
       nextReviewAt: r.next_review_at || 0,
       familiarAt: r.familiar_at || 0,
       familiarNextAt: r.familiar_next_at || 0,
+      baseWordId: r.base_word_id || 0,          // v1.21.0: 关联的 Victor 底座词 id
+      detail: r.detail || null,                 // v1.21.0: Victor 富内容快照
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -1148,6 +1150,18 @@ App.DB = (function () {
     });
   }
 
+  // ========== v1.21.0 Victor 词库后端同步 ==========
+
+  /** 触发后端同步任务: 把共享底座词库全量同步到当前用户私有词库 (服务端执行) */
+  async function syncVictor() {
+    return await callEdgeFunction('VICTOR_SYNC_URL', { syncCode: getSyncCode() });
+  }
+
+  /** 查询最近一次 Victor 同步任务的进度/结果 (退出重进仍可查) */
+  async function victorSyncStatus() {
+    return await rpc('victor_sync_status', { p_sync_code: getSyncCode() });
+  }
+
   // ========== v1.12.0 词典导入 ==========
 
   /** 创建导入批次 */
@@ -1364,6 +1378,9 @@ App.DB = (function () {
     clearWords: clearWords,
     clearAll: clearAll,
     exportAll: exportAll,
+    // v1.21.0 Victor 词库后端同步
+    syncVictor: syncVictor,
+    victorSyncStatus: victorSyncStatus,
     // 授权系统 (RPC + Edge Function)
     rpc: rpc,
     callEdgeFunction: callEdgeFunction,

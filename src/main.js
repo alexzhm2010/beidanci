@@ -74,6 +74,17 @@ App.isAdmin = function () {
   return username === App.Config.AUTH.ADMIN_CODE;
 };
 
+// v1.21.0: 导航可见性 — Victor词库 tab 仅 admin 可见 (普通用户改用词库页「同步 Victor」)
+App.applyNavVisibility = function () {
+  var btn = document.querySelector('.nav-btn[data-tab="victor"]');
+  if (!btn) return;
+  if (App.isAdmin()) {
+    btn.style.display = '';
+  } else {
+    btn.style.display = 'none';
+  }
+};
+
 // v1.10.0 admin 专属导航 (4 页: 看板/词库/用户/设置, 替代 学习/词库/统计/我的)
 App.initAdminNav = function () {
   var nav = document.querySelector('.app-nav');
@@ -201,8 +212,11 @@ App.loadVictorFrame = function () {
 };
 
 App.switchTab = async function (tabName) {
-  // v1.20.0: 兼容老版本 lastTab — 旧三个词书 tab 统一映射到新的 victor, 避免落到已删除的 view
-  if (['bookscan', 'bookwords', 'bookrecords'].indexOf(tabName) !== -1) tabName = 'victor';
+  // v1.21.0: 兼容老版本 lastTab — 旧三个词书 tab / victor 对普通用户统一回退 learning
+  // (victor 现为 admin 专用录入后台, 普通用户改用词库页「同步 Victor」按钮)
+  if (['bookscan', 'bookwords', 'bookrecords', 'victor'].indexOf(tabName) !== -1) {
+    tabName = App.isAdmin() ? 'victor' : 'learning';
+  }
 
   // v1.11.1 性能优化: 切换瞬间立即更新 nav active 态 (视觉反馈), 但不立即清空旧 view
   // 旧 view 保留显示直到新 view 内容就绪, 避免空白闪烁
@@ -210,15 +224,18 @@ App.switchTab = async function (tabName) {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
   });
 
-  // v1.20.0: 词书模块收敛为单个 Victor词库 tab — 所有登录用户可见, admin 也一样。
-  // 走独立的 iframe 容器, 不经过 admin / 普通用户的模块渲染分支。
+  // v1.21.0: 词书模块为 admin 专用录入后台 (往共享底座加词); 普通用户不可见。
+  // 校验兜底: 即使手改 lastTab 或伪造点击, 普通用户也无法进入。
   if (tabName === 'victor') {
-    App.loadVictorFrame();
-    localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
-    document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
-    var bv = document.getElementById('view-victor');
-    if (bv) bv.classList.add('active');
-    return;
+    if (!App.isAdmin()) tabName = 'learning'; // 落到下面的通用渲染流程
+    else {
+      App.loadVictorFrame();
+      localStorage.setItem(App.Config.KEY_LAST_TAB, tabName);
+      document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
+      var bv = document.getElementById('view-victor');
+      if (bv) bv.classList.add('active');
+      return;
+    }
   }
 
   // v1.10.0: admin 走专属四页, 复用 profile 容器
@@ -289,6 +306,7 @@ App.initializeApp = async function () {
   try {
     await App.DB.init();
     App.updateSyncCodeBadge();
+    App.applyNavVisibility(); // v1.21.0: 普通用户隐藏 Victor词库 tab
 
     // v1.10.0: admin 登录后走专属四页, 普通用户恢复原导航
     var lastTab = localStorage.getItem(App.Config.KEY_LAST_TAB) || 'learning';

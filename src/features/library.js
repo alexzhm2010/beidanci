@@ -20,6 +20,7 @@ App.Library = (function () {
             <button class="btn btn-outline" id="btnImport">批量导入</button>
             <button class="btn btn-outline" id="btnAddWord" style="display:none;">单个新增</button>
             <button class="btn btn-outline" id="btnScanWord">扫词加词</button>
+            <button class="btn btn-outline" id="btnSyncVictor">同步 Victor</button>
             <button class="btn btn-outline" id="btnExport">导出备份</button>
             <button class="btn btn-primary" id="btnSyncPreset">同步预置词库</button>
           </div>
@@ -113,6 +114,7 @@ App.Library = (function () {
     document.getElementById('btnImport').addEventListener('click', showImportModal);
     document.getElementById('btnAddWord').addEventListener('click', function () { showWordModal(); });
     document.getElementById('btnScanWord').addEventListener('click', showCameraScan);
+    document.getElementById('btnSyncVictor').addEventListener('click', showSyncVictorModal);
     document.getElementById('btnExport').addEventListener('click', showExportModal);
     document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
 
@@ -1260,6 +1262,99 @@ App.Library = (function () {
       } catch (e) {
         App.showToast('导出失败: ' + e.message, 'error');
       }
+    });
+  }
+
+  // ========== v1.21.0 同步 Victor 词库 (后端任务, 进度持久化) ==========
+  var _victorPollTimer = null;
+
+  function statusText(s) {
+    if (!s) return '尚未同步';
+    if (s.status === 'running' || s.status === 'pending') {
+      var pct = s.total > 0 ? Math.round((s.processed / s.total) * 100) : 0;
+      return '同步中 ' + (s.processed || 0) + ' / ' + (s.total || 0) + '（' + pct + '%）';
+    }
+    if (s.status === 'done') {
+      return '上次同步完成：新增 ' + (s.added || 0) + ' 词，富化 ' + (s.enriched || 0) + ' 词';
+    }
+    if (s.status === 'failed') {
+      return '上次同步失败：' + (s.error || '未知错误');
+    }
+    return '尚未同步';
+  }
+
+  function showSyncVictorModal() {
+    var body =
+      '<div style="line-height:1.8;font-size:14px;">' +
+        '<p style="margin:0 0 10px;">一键把 <b>Victor 共享词库</b> 同步到你的私有词库：</p>' +
+        '<ul style="margin:0 0 12px;padding-left:20px;color:var(--color-text-light);">' +
+          '<li>已存在的词：用 Victor 富文本覆盖释义（<b>保留你的学习进度</b>）</li>' +
+          '<li>Victor 独有的词：直接新增</li>' +
+          '<li>你自己独有的词：不改动</li>' +
+        '</ul>' +
+        '<p style="margin:0 0 12px;font-size:12px;color:var(--color-text-light);">' +
+          '同步在后台执行，关闭页面也不中断；再次打开可继续查看进度。</p>' +
+        '<div id="victorSyncStatus" style="padding:12px;background:var(--color-bg);border-radius:8px;' +
+          'margin-bottom:14px;font-weight:600;">正在查询同步状态...</div>' +
+      '</div>' +
+      '<div class="form-actions">' +
+        '<button class="btn btn-outline" id="victorSyncCancel">关闭</button>' +
+        '<button class="btn btn-primary" id="victorSyncStart">开始同步</button>' +
+      '</div>';
+    App.showModal('同步 Victor 词库', body);
+
+    var statusEl = document.getElementById('victorSyncStatus');
+    var startBtn = document.getElementById('victorSyncStart');
+    document.getElementById('victorSyncCancel').addEventListener('click', function () {
+      if (_victorPollTimer) { clearInterval(_victorPollTimer); _victorPollTimer = null; }
+      App.hideModal();
+    });
+
+    function renderStatus(s) {
+      if (!statusEl) return;
+      statusEl.textContent = statusText(s);
+      // 同步中禁用开始按钮, 防止重复触发
+      if (startBtn) {
+        var busy = s && (s.status === 'running' || s.status === 'pending');
+        startBtn.disabled = !!busy;
+        startBtn.textContent = busy ? '同步进行中...' : '开始同步';
+      }
+    }
+
+    function poll() {
+      App.DB.victorSyncStatus().then(function (rows) {
+        var s = Array.isArray(rows) ? rows[0] : rows;
+        renderStatus(s);
+        if (s && (s.status === 'running' || s.status === 'pending')) {
+          // 继续轮询; 注意页面关闭时 interval 自然停止, 服务端任务不受影响
+          if (!_victorPollTimer) {
+            _victorPollTimer = setInterval(poll, 1500);
+          }
+        } else {
+          if (_victorPollTimer) { clearInterval(_victorPollTimer); _victorPollTimer = null; }
+          if (s && s.status === 'done') loadWords(''); // 完成后刷新词库
+        }
+      }).catch(function (e) {
+        if (statusEl) statusEl.textContent = '查询状态失败：' + e.message;
+      });
+    }
+
+    // 打开即查一次 (重进页面能看到上次进度/结果)
+    poll();
+
+    startBtn.addEventListener('click', function () {
+      startBtn.disabled = true; startBtn.textContent = '正在启动...';
+      App.DB.syncVictor()
+        .then(function () {
+          statusEl.textContent = '已启动，后台同步中...';
+          if (_victorPollTimer) clearInterval(_victorPollTimer);
+          _victorPollTimer = null;
+          poll();
+        })
+        .catch(function (e) {
+          statusEl.textContent = '启动失败：' + e.message;
+          startBtn.disabled = false; startBtn.textContent = '开始同步';
+        });
     });
   }
 

@@ -439,3 +439,22 @@ input, textarea, select { font-family: inherit; outline: none; }
 .view-frame { padding: 0; }
 .bookscan-frame { width: 100%; height: calc(100vh - 130px); min-height: 500px; border: 0; display: block; background: #f3f8fd; }
 @media (max-width: 768px) { .bookscan-frame { height: calc(100vh - 110px); min-height: 460px; } }
+
+/* v1.21.0 Victor 富内容快照 (作用域 .rich-detail, 不污染其他样式) */
+.rich-detail { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--color-border, #e0e0e0); text-align: left; max-height: 46vh; overflow-y: auto; }
+.rd-senses { list-style: none; margin: 0; padding: 0; }
+.rd-sense { padding: 7px 0; border-bottom: 1px solid rgba(148,180,210,.18); font-size: 14px; line-height: 1.55; }
+.rd-sense:last-child { border-bottom: none; }
+.rd-pos { display: inline-block; background: #e2f0fc; color: #35618f; padding: 1px 7px; border-radius: 5px; font-size: 11px; font-weight: 700; margin-right: 6px; }
+.rd-def { color: var(--color-text); font-weight: 600; }
+.rd-freq, .rd-tag { display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 5px; font-size: 10px; font-weight: 700; }
+.rd-freq { background: #35618f; color: #fff; }
+.rd-tag { background: #f0f4f8; color: #5a7186; }
+.rd-eng { color: #8a97a5; font-size: 12px; font-style: italic; margin-top: 3px; }
+.rd-example { margin: 4px 0 0 8px; font-size: 13px; line-height: 1.5; }
+.rd-kind { display: inline-block; background: #eef4fb; color: #4a7db5; border-radius: 4px; font-size: 10px; padding: 0 5px; margin-right: 6px; }
+.rd-en { color: #2c3e50; }
+.rd-zh { color: #61758b; margin-left: 6px; }
+.rd-note { margin-top: 8px; padding: 8px 10px; background: #f0f7ff; border-left: 3px solid #4a7db5; border-radius: 6px; font-size: 13px; line-height: 1.55; }
+.rd-note-type { display: inline-block; background: #4a7db5; color: #fff; border-radius: 5px; font-size: 10px; font-weight: 700; padding: 1px 6px; margin-right: 6px; }
+.rd-note-body { margin-top: 3px; color: #40566b; }
