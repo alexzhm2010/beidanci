@@ -109,12 +109,139 @@ App.Utils = {
     html += '</div>';
     return html;
   },
+
+  /**
+   * v1.22.1: 原样移植 Victor 词库卡片 DOM 结构 (一比一复刻 app.js wordCardHtml)。
+   * 数据源为 beidanci 词对象 + detail 快照 (字段名与 Victor 一致)。
+   * 差异: 三态徽标 → beidanci 熟练度徽标; 去掉左滑操作区/关系网跳转 (依赖 Victor 全局状态)。
+   */
+  renderVictorCard: function (w) {
+    var esc = App.Utils.escapeHtml;
+    var detail = (w.detail && typeof w.detail === 'object') ? w.detail : {};
+    var senses = Array.isArray(detail.senses) ? detail.senses : [];
+    var notes = Array.isArray(detail.notes) ? detail.notes : [];
+
+    // ---- 义项 (复刻 Victor: 实心序号 + 词性 + 标签 + 英释 + 例句/短语) ----
+    var sensesHtml = senses.map(function (s) {
+      var senseNo = s.sense_no || s.no || 0;
+      var usageLabel = s.usage_label || s.usage || '';
+      var defText = s.chinese_def || s.def || '';
+      var tags = [];
+      if (s.countability) tags.push('<span class="tag tag-count">' + esc(s.countability) + '</span>');
+      if (usageLabel) tags.push('<span class="tag tag-usage">' + esc(usageLabel) + '</span>');
+      if (s.antonym) tags.push('<span class="tag tag-anto">反 ' + esc(s.antonym) + '</span>');
+      var freq = Number(s.sense_freq || 0);
+      var noCls = freq === 1 ? 'no no-high' : (freq === 2 ? 'no no-low' : 'no');
+      var freqTag = freq === 1 ? '<span class="tag tag-freq">常考</span>' : '';
+      var no = senseNo ? '<span class="' + noCls + '">' + senseNo + '</span>' : '';
+
+      // 摊平嵌套 children (短语下挂例句)
+      var flatItems = [];
+      var flatten = function (arr, parent) {
+        (arr || []).forEach(function (it) {
+          var copy = {};
+          for (var k in it) if (Object.prototype.hasOwnProperty.call(it, k)) copy[k] = it[k];
+          copy._parent = parent || '';
+          flatItems.push(copy);
+          if (it.children && it.children.length) flatten(it.children, it.en || parent || '');
+        });
+      };
+      flatten(s.examples || s.items || [], '');
+
+      var items = flatItems.map(function (it) {
+        var kind = it.kind === 'phrase'
+          ? '<span class="kind">短语</span>' : '<span class="kind">例句</span>';
+        var src = it.source ? '<span class="src">' + esc(it.source) + '</span>' : '';
+        var gloss = it.gloss ? '<span class="gloss">' + esc(it.gloss) + '</span>' : '';
+        var parent = (it.parent_phrase || it._parent)
+          ? '<span class="gloss">↳ ' + esc(it.parent_phrase || it._parent) + '</span>' : '';
+        return '<div class="item src-wrap">' + kind +
+          '<span class="en">' + esc(it.en || '') + '</span>' +
+          '<span class="zh">' + esc(it.zh || '') + '</span>' + parent + gloss + src + '</div>';
+      }).join('');
+
+      var engDef = s.english_def ? '<div class="eng-def">' + esc(s.english_def) + '</div>' : '';
+      return '<div class="sense"><div class="sense-hd">' + no +
+        '<span class="pos">' + esc(s.pos || '') + '</span>' +
+        '<span class="def">' + esc(defText) + '</span>' + freqTag + tags.join('') + '</div>' +
+        engDef + items + '</div>';
+    }).join('');
+
+    // ---- 核心释义智能合并 (复刻 Victor) ----
+    var normDef = function (s) {
+      return String(s || '').toLowerCase()
+        .replace(/\[[^\]]*\]/g, '')
+        .replace(/(?:n|v|vt|vi|adj|adv|prep|conj|pron|art|aux|int|abbr|phr)\.?\s*/gi, '')
+        .replace(/[\s；;，,。:：/（）()\[\]「」·&…]/g, '');
+    };
+    var coreRaw = (detail.level_tag || '').trim();
+    var sideRaw = (detail.inline_def || (senses[0] && (senses[0].chinese_def || senses[0].def)) || '').trim();
+    var coreText = normDef(coreRaw), sideText = normDef(sideRaw);
+    var mergedDef = '';
+    if (coreRaw && sideRaw) {
+      if (coreText === sideText) mergedDef = coreRaw.length >= sideRaw.length ? coreRaw : sideRaw;
+      else if (coreText.indexOf(sideText) !== -1) mergedDef = coreRaw;
+      else if (sideText.indexOf(coreText) !== -1) mergedDef = sideRaw;
+      else mergedDef = coreRaw + '；' + sideRaw;
+    } else {
+      mergedDef = coreRaw || sideRaw;
+    }
+    // 无富快照时, 右侧灰字回退到 beidanci 的中文释义
+    if (!mergedDef && w.chineseMeaning) mergedDef = w.chineseMeaning;
+    var wordDefHtml = mergedDef ? '<span class="word-def">' + esc(mergedDef) + '</span>' : '';
+    var page = detail.page_no ? '<span style="font-size:11px;color:var(--muted)">P' + esc(detail.page_no) + '</span>' : '';
+    var partialTag = detail.partial ? '<span class="partial-tag" title="页尾被截断，扫描下一页会自动补全">待补全</span>' : '';
+
+    var IDENTITY = { '*': '课标外', '⊕': '增补', '⊖': '删减', 'derived': '派生词' };
+    var identityTag = '';
+    if (detail.identity_tag && IDENTITY[detail.identity_tag]) {
+      identityTag = '<span class="tag tag-identity id-' + esc(detail.identity_tag) + '" title="' + IDENTITY[detail.identity_tag] + '">' + esc(detail.identity_tag) + '</span>';
+    }
+    var derivedTag = detail.derived_from
+      ? '<span class="tag tag-derived" title="派生自 ' + esc(detail.derived_from) + '">派生自 ' + esc(detail.derived_from) + '</span>' : '';
+
+    // ---- 蓝底标签框 (辨/注/同/反/高考链接 ...) ----
+    var notesHtml = notes.map(function (n) {
+      var t = (n.note_type && String(n.note_type).trim()) || '注';
+      var title = n.title ? '<div class="note-title">' + esc(n.title) + '</div>' : '';
+      var content = String(n.content || '').split(/\n+/).filter(Boolean)
+        .map(function (line) { return '<div class="note-line">' + esc(line).replace(/^•\s*/, '• ') + '</div>'; }).join('');
+      return '<div class="vw-note note-' + esc(t) + '"><span class="note-badge">' + esc(t) + '</span>' + title + '<div class="note-body">' + content + '</div></div>';
+    }).join('');
+
+    // ---- 熟练度徽标 (替代 Victor 三态) ----
+    var level = App.Algorithm.getProficiencyLevel(w);
+    var profText = w.totalCount > 0
+      ? Math.round((w.knownCount / w.totalCount) * 100) + '%' : '-';
+    var profTag = '<span class="study-tag custom" title="熟练度">' + esc(level.label + ' ' + profText) + '</span>';
+
+    var hasRich = sensesHtml || notesHtml;
+    var bodyHtml = hasRich
+      ? (sensesHtml + notesHtml)
+      : '<div style="font-size:13px;color:var(--muted);padding:8px 0">（无详细义项）</div>';
+
+    var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.word));
+    return '<div class="word-card' + (detail.identity_tag ? ' vcard-tagged' : '') + '"' +
+      ' id="wc-' + key + '" data-word-id="' + esc(w.id) + '"' +
+      ' data-derived="' + (detail.derived_from ? '1' : '0') + '">' +
+      '<div class="word-row"><div class="word-swipe">' +
+        '<div class="word-hd"' + (hasRich ? ' data-expandable="1" role="button" aria-expanded="false" tabindex="0"' : '') + '>' +
+          (hasRich ? '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' : '') +
+          '<span class="word-name">' + esc(w.word) + '</span>' +
+          '<span class="word-ph">' + esc(w.phonetic || '') + '</span>' +
+          profTag + identityTag + derivedTag + page + partialTag +
+          wordDefHtml +
+        '</div>' +
+      '</div></div>' +
+      '<div class="word-body">' + bodyHtml + '</div>' +
+    '</div>';
+  },
 };
 
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.22.0',
+  APP_VERSION: '1.22.1',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

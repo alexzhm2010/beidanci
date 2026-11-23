@@ -29,8 +29,8 @@ App.Library = (function () {
           <span id="libraryWordCount">共 0 词</span>
           <span id="librarySearchInfo"></span>
         </div>
-        <!-- v1.22.0: 词库列表由表格改为 Victor 风格卡片 (词头+音标+释义+熟练度, 有富内容可展开) -->
-        <div class="word-card-list" id="wordCardList"></div>
+        <!-- v1.22.1: 词库列表原样移植 Victor 词库卡片 (作用域 .victor-wordlist) -->
+        <div class="victor-wordlist" id="wordCardList"></div>
         <div class="library-pagination" id="libraryPagination">
           <button class="btn btn-outline btn-sm" id="btnFirstPage" title="第一页">&laquo;</button>
           <button class="btn btn-outline btn-sm" id="btnPrevPage" title="上一页">&lsaquo; 上一页</button>
@@ -106,11 +106,11 @@ App.Library = (function () {
     document.getElementById('btnExport').addEventListener('click', showExportModal);
     document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
 
-    // v1.22.0: 卡片事件委托 — 点词头展开/收起富内容 (仅"有富内容"的卡片可展开)
+    // v1.22.1: 卡片事件委托 — 点词头展开/收起富内容 (复刻 Victor toggleCard)
     document.getElementById('wordCardList').addEventListener('click', function (e) {
-      var head = e.target.closest('.vcard-head[data-expandable="1"]');
+      var head = e.target.closest('.word-hd[data-expandable="1"]');
       if (!head) return;
-      var card = head.closest('.vcard');
+      var card = head.closest('.word-card');
       if (!card) return;
       var open = card.classList.toggle('open');
       head.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -230,51 +230,15 @@ App.Library = (function () {
     listEl.innerHTML = words.map(function (w) { return renderCard(w); }).join('');
   }
 
+  // v1.22.1: 原样移植 Victor 词库卡片结构 (公共函数), 有富内容可展开, 无则词头灰字显示释义
   function renderCard(w) {
-    var esc = App.Utils.escapeHtml;
-    var level = App.Algorithm.getProficiencyLevel(w);
-    var proficiency = w.totalCount > 0
-      ? Math.round((w.knownCount / w.totalCount) * 100) + '%'
-      : '-';
-    var hasDetail = !!(w.detail && typeof w.detail === 'object' &&
-      ((Array.isArray(w.detail.senses) && w.detail.senses.length) ||
-       (Array.isArray(w.detail.notes) && w.detail.notes.length)));
-
-    // 词头: 箭头(可展开时) + 词名 + 音标 + 熟练度徽标
-    var head =
-      '<div class="vcard-head' + (hasDetail ? ' expandable' : '') + '"' +
-        (hasDetail ? ' data-expandable="1" aria-expanded="false" role="button" tabindex="0"' : '') + '>' +
-        (hasDetail ? '<svg class="vcard-arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' : '') +
-        '<span class="vcard-word">' + esc(w.word) + '</span>' +
-        (w.phonetic ? '<span class="vcard-ph">' + esc(w.phonetic) + '</span>' : '') +
-        '<span class="vcard-prof" style="background:' + level.color + '20;color:' + level.color + '">' +
-          level.label + ' ' + proficiency + '</span>' +
-      '</div>';
-
-    if (hasDetail) {
-      // 有富内容: 折叠详情, 默认收起
-      return '' +
-        '<div class="vcard' + (w.detail && w.detail.identity_tag ? ' vcard-tagged' : '') + '" data-word-id="' + esc(w.id) + '">' +
-          head +
-          '<div class="vcard-body">' + App.Utils.renderRichDetail(w.detail) + '</div>' +
-        '</div>';
-    }
-
-    // 无富内容: 单独一行中文释义 (不折叠)
-    return '' +
-      '<div class="vcard" data-word-id="' + esc(w.id) + '">' +
-        head +
-        '<div class="vcard-plain-meaning">' +
-          (w.partOfSpeech ? '<span class="vcard-pos">' + esc(w.partOfSpeech) + '</span>' : '') +
-          esc(w.chineseMeaning) +
-        '</div>' +
-      '</div>';
+    return App.Utils.renderVictorCard(w);
   }
 
   // v1.11.1 性能优化: 局部更新某一卡片 (编辑后), 避免全表 reload
-  // v1.22.0: 表格改卡片, 直接整体替换卡片节点
+  // v1.22.1: 表格改卡片, 直接整体替换卡片节点
   function updateRowInPlace(word) {
-    var oldCard = document.querySelector('.vcard[data-word-id="' + CSS.escape(word.id) + '"]');
+    var oldCard = document.querySelector('.word-card[data-word-id="' + CSS.escape(word.id) + '"]');
     if (!oldCard) return false;
     var tmp = document.createElement('div');
     tmp.innerHTML = renderCard(word);

@@ -459,30 +459,75 @@ input, textarea, select { font-family: inherit; outline: none; }
 .rd-note-type { display: inline-block; background: #4a7db5; color: #fff; border-radius: 5px; font-size: 10px; font-weight: 700; padding: 1px 6px; margin-right: 6px; }
 .rd-note-body { margin-top: 3px; color: #40566b; }
 
-/* ========== v1.22.0 词库 Victor 风格卡片列表 (作用域 .vcard, 不污染其他样式) ========== */
-.word-card-list { background: var(--color-card); border-radius: var(--radius); box-shadow: var(--shadow); max-height: calc(100vh - 280px); overflow-y: auto; padding: 4px 0; }
-.vcard { border-bottom: 1px solid var(--color-border-light, #eef2f6); padding: 2px 16px; }
-.vcard:last-child { border-bottom: none; }
-.vcard-placeholder { text-align: center; padding: 40px 16px; color: var(--color-text-lighter, #9aa7b4); font-size: 14px; }
-.vcard-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 0; }
-.vcard-head.expandable { cursor: pointer; user-select: none; }
-.vcard-head.expandable:hover { background: rgba(74,125,181,.05); }
-.vcard-head.expandable:focus-visible { outline: 2px solid #4a7db5; outline-offset: 2px; }
-.vcard-arrow { width: 15px; height: 15px; flex: 0 0 15px; color: #9aa7b4; transition: transform .18s ease; }
-.vcard.open .vcard-arrow { transform: rotate(90deg); }
-.vcard-word { font-size: 16px; font-weight: 700; color: var(--color-text); word-break: break-word; }
-.vcard-ph { font-family: Georgia, serif; font-style: italic; font-size: 13px; color: var(--color-text-light, #8a97a5); }
-.vcard-prof { margin-left: auto; flex: 0 0 auto; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-.vcard-body { display: none; padding: 2px 0 14px 23px; }
-.vcard.open .vcard-body { display: block; }
-.vcard-body .rich-detail { margin-top: 4px; padding-top: 8px; max-height: 50vh; }
-.vcard-plain-meaning { padding: 0 0 12px 23px; font-size: 14px; line-height: 1.55; color: var(--color-text, #2c3e50); }
-.vcard-pos { display: inline-block; background: var(--color-info, #4a7db5); color: #fff; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 6px; }
+/* ========== v1.22.1 词库卡片: Victor 词库样式原样移植 (作用域 .victor-wordlist, 不污染其他样式) ==========
+   以下选择器/数值摘自 public/bookscan/index.html 与 app.js wordCardHtml, 保持 Victor 视觉一致。
+   仅三态徽标换成熟练度徽标 (沿用 .study-tag.custom 样式), 去掉左滑操作区/关系网跳转。 */
+.victor-wordlist {
+  /* Victor 主题令牌 (限定在词库列表作用域, 不覆盖全局) */
+  --radius:16px; --primary:#4a7db5; --primary-d:#35618f; --primary-l:#e2f0fc;
+  --accent:#c2594e; --green:#1f9d6b; --bg:#f3f8fd; --card:#fff;
+  --text:#27384a; --muted:#61758b; --line:rgba(148,180,210,.32);
+  --ring:#7ba6d0; --glass:rgba(255,255,255,.74); --shadow:0 8px 28px rgba(70,115,160,.12);
+  background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
+  max-height: calc(100vh - 280px); overflow-y: auto; padding: 6px 16px 10px;
+}
+.victor-wordlist .vcard-placeholder { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 14px; }
+/* 词条：词头一行（深蓝加粗）+ 音标斜体（压紧排版） */
+.victor-wordlist .word-card { border-bottom:1px solid #ece2cc; padding:6px 2px; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+.victor-wordlist .word-card:last-child { border-bottom:none; }
+.victor-wordlist .word-hd { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; cursor:pointer; position:relative; }
+.victor-wordlist .word-hd:active { opacity:.7; }
+.victor-wordlist .word-name { font-family:Georgia,"Times New Roman",serif; font-size:17px; font-weight:800; color:#1d3f7a; letter-spacing:.2px; }
+.victor-wordlist .word-ph { font-family:Georgia,serif; color:#8a7f6d; font-size:12px; font-style:italic; }
+.victor-wordlist .word-def { flex:1; font-size:12px; color:#7a6f5c; text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:80px; }
+.victor-wordlist .arrow { width:12px; stroke:#b0a58f; transition:transform .2s; flex-shrink:0; align-self:center; }
+.victor-wordlist .word-card.open .arrow { transform:rotate(90deg); }
+.victor-wordlist .word-body { display:none; padding:4px 0 4px 8px; }
+.victor-wordlist .word-card.open .word-body { display:block; }
+/* 学习状态徽标 (词头旁): beidanci 用 .custom 显示熟练度 */
+.victor-wordlist .study-tag { font-size:10px; font-weight:700; padding:1px 7px; border-radius:9px; white-space:nowrap; }
+.victor-wordlist .study-tag.custom { background:#ede9fe; color:#6d28d9; }
+.victor-wordlist .word-row { position:relative; overflow:hidden; border-radius:4px; }
+.victor-wordlist .word-swipe { overflow:hidden; }
+.victor-wordlist .word-card.is-progress { box-shadow:inset 3px 0 0 #f59e0b; background:rgba(251,191,36,.06); border-radius:4px; }
+/* 义项：实心圆序号 + 彩色词性 */
+.victor-wordlist .sense { padding:5px 0 2px; border-bottom:1px dashed #e6dcc4; }
+.victor-wordlist .sense:last-child { border-bottom:none; }
+.victor-wordlist .sense-hd { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; margin-bottom:2px; }
+.victor-wordlist .no { width:17px; height:17px; background:#1d3f7a; color:#fff; border-radius:50%; font-size:10px; display:inline-flex; align-items:center; justify-content:center; font-weight:700; }
+.victor-wordlist .pos { color:#c0392b; font-style:italic; font-size:12px; font-weight:700; }
+.victor-wordlist .def { font-weight:600; font-size:13px; color:#243247; }
+.victor-wordlist .tag { font-size:10px; padding:1px 6px; border-radius:7px; }
+.victor-wordlist .tag-count { background:#e0e7ff; color:#3730a3; }
+.victor-wordlist .tag-usage { background:#fef3c7; color:#92400e; }
+.victor-wordlist .tag-anto { background:#dcfce7; color:#166534; }
+.victor-wordlist .no-high { background:#dc2626; }
+.victor-wordlist .no-low { background:#fca5a5; color:#7f1d1d; }
+.victor-wordlist .tag-freq { background:#fee2e2; color:#b91c1c; }
+.victor-wordlist .tag-identity { font-weight:700; }
+.victor-wordlist .tag-derived { background:#f5f3ff; color:#6d28d9; }
+.victor-wordlist .eng-def { font-family:Georgia,serif; font-style:italic; font-size:12px; color:#64748b; margin:2px 0 4px 26px; }
+/* 蓝底标签框 */
+.victor-wordlist .vw-note { position:relative; margin:8px 0 4px 8px; padding:8px 10px 8px 42px; background:linear-gradient(135deg,#eef2ff,#f8fafc); border:1px solid #e0e7ff; border-radius:8px; font-size:12.5px; color:#334155; }
+.victor-wordlist .note-badge { position:absolute; left:8px; top:8px; background:#2563eb; color:#fff; font-size:11px; font-weight:700; padding:2px 6px; border-radius:5px; }
+.victor-wordlist .note-title { font-weight:700; color:#1e3a8a; margin-bottom:3px; }
+.victor-wordlist .note-line { margin:2px 0; line-height:1.5; }
+.victor-wordlist .vw-note.note-高考链接 { background:linear-gradient(135deg,#e0edff,#eef4ff); border-color:#a9c8ef; }
+.victor-wordlist .vw-note.note-高考链接 .note-badge { background:#1d4ed8; }
+.victor-wordlist .vw-note.note-高考链接 .note-title { color:#1e40af; }
+.victor-wordlist .vw-note.note-辨 .note-badge { background:#7c3aed; }
+.victor-wordlist .vw-note.note-同 .note-badge { background:#0891b2; }
+.victor-wordlist .vw-note.note-反 .note-badge { background:#db2777; }
+.victor-wordlist .vw-note.note-句型 .note-badge { background:#ea580c; }
+.victor-wordlist .partial-tag { font-size:10px; color:#b45309; background:#fef3c7; padding:1px 6px; border-radius:6px; }
+.victor-wordlist .word-card[data-derived="1"] .word-name { color:#6d28d9; }
+/* 例句/短语 */
+.victor-wordlist .item { margin:3px 0 3px 26px; font-size:13px; }
+.victor-wordlist .item .en { font-family:Georgia,serif; font-style:italic; color:#26303d; }
+.victor-wordlist .item .zh { color:#5b6675; margin-left:5px; }
+.victor-wordlist .item.src-wrap .src { font-size:10px; color:var(--accent); background:#fff1f2; padding:0 5px; border-radius:5px; margin-left:5px; }
+.victor-wordlist .gloss { color:var(--muted); font-size:11px; }
+.victor-wordlist .kind { font-size:9px; color:#94a3b8; border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:4px; }
 @media (max-width: 768px) {
-  .word-card-list { max-height: calc(100vh - 320px); }
-  .vcard { padding: 2px 12px; }
-  .vcard-word { font-size: 15px; }
-  .vcard-ph { font-size: 12px; }
-  .vcard-body { padding-left: 4px; }
-  .vcard-plain-meaning { padding-left: 4px; font-size: 13px; }
+  .victor-wordlist { max-height: calc(100vh - 320px); padding: 6px 10px 10px; }
 }
