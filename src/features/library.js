@@ -14,25 +14,24 @@ window.App = window.App || {};
 App.Library = (function () {
   // #view-library 的内部 HTML (迁移自 index.html, init() 首次挂载时注入)
   const HTML_TEMPLATE = `
-        <!-- v1.23.0: 词库工具栏沿用 beidanci 功能按钮, 列表主体一比一复刻 Victor 词库页 -->
+        <!-- v1.26.3: 搜索栏吸顶, 统计并入搜索行; 仅保留批量导入+同步Victor; 词表整页滚动高度自适应 -->
         <div class="words-toolbar">
           <div class="search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
             <input type="text" id="searchInput" placeholder="搜索英文单词或中文释义…" autocomplete="off">
-            <div class="toolbar-buttons">
-              <button class="btn btn-outline btn-sm" id="btnImport">批量导入</button>
-              <button class="btn btn-outline btn-sm" id="btnAddWord" style="display:none;">单个新增</button>
-              <button class="btn btn-outline btn-sm" id="btnScanWord">扫词</button>
-              <button class="btn btn-outline btn-sm" id="btnSyncVictor">同步 Victor</button>
-              <button class="btn btn-outline btn-sm" id="btnExport">导出</button>
-              <button class="btn btn-primary btn-sm" id="btnSyncPreset">同步预置词库</button>
-            </div>
+            <div class="list-summary" id="listSummary"><b>0</b><span class="frac-sep">/</span>0</div>
           </div>
-          <div class="list-summary" id="listSummary"><b>0</b><span class="frac-sep">/</span>0</div>
+        </div>
+        <div class="toolbar-buttons library-quick-actions">
+          <button class="btn btn-outline btn-sm" id="btnImport">批量导入</button>
+          <button class="btn btn-outline btn-sm" id="btnSyncVictor">同步 Victor</button>
         </div>
         <div id="listView">
           <div id="wordCardList" class="victor-wordlist book-list"></div>
         </div>
+        <button id="backToTop" class="back-to-top" title="回到顶部" aria-label="回到顶部">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
       `;
 
   // ========== 第三方库按需懒加载 ==========
@@ -97,13 +96,17 @@ App.Library = (function () {
     }, 180);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
-    // 工具栏按钮
+    // 工具栏按钮 (v1.26.3: 仅保留 批量导入 + 同步 Victor)
     document.getElementById('btnImport').addEventListener('click', showImportModal);
-    document.getElementById('btnAddWord').addEventListener('click', function () { showWordModal(); });
-    document.getElementById('btnScanWord').addEventListener('click', showCameraScan);
     document.getElementById('btnSyncVictor').addEventListener('click', showSyncVictorModal);
-    document.getElementById('btnExport').addEventListener('click', showExportModal);
-    document.getElementById('btnSyncPreset').addEventListener('click', showSyncPresetModal);
+
+    // 回到顶部按钮 (整页滚动后右下角浮标)
+    var backToTop = document.getElementById('backToTop');
+    if (backToTop) {
+      backToTop.addEventListener('click', function () {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    }
 
     // 事件委托: 点词头展开/收起 (复刻 Victor toggleCard; 所有词卡均可展开)
     document.getElementById('wordCardList').addEventListener('click', function (e) {
@@ -261,22 +264,31 @@ App.Library = (function () {
     renderedCount += batch.length;
   }
 
-  // 滚动预加载 (v1.26.1): 监听滚动容器的 scroll 事件, 按"距底部剩余高度"精确预加载,
-  // 提前填满预加载区, 无需"加载更多"提示条, 滚动到底无感续载, 更快更丝滑。
+  // 滚动预加载 (v1.26.3): 词表改为整页滚动(高度自适应), 故监听 window 的 scroll。
+  // 按"文档距底部剩余高度"精确预加载, 提前填满预加载区, 滚动到底无感续载。
+  // 同时控制右下角"回到顶部"按钮的显隐。
   function setupAutoLoad() {
-    var scroller = document.getElementById('wordCardList');
-    if (!scroller) return;
-    if (_scrollHandler) scroller.removeEventListener('scroll', _scrollHandler);
+    var backBtn = document.getElementById('backToTop');
+    if (_scrollHandler) window.removeEventListener('scroll', _scrollHandler);
     _scrollHandler = function () {
       // 连续补载: 直到预加载距离被填满, 或已全部渲染
       var guard = 0;
       while (renderedCount < filteredWords.length && guard++ < 12) {
-        var remain = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        var doc = document.documentElement;
+        var remain = doc.scrollHeight - (window.scrollY || window.pageYOffset) - window.innerHeight;
         if (remain > PRELOAD_PX) break;
         appendWords();
       }
+      // 回到顶部按钮: 滚动超过一屏才显示
+      if (backBtn) {
+        if ((window.scrollY || window.pageYOffset) > window.innerHeight * 0.6) {
+          backBtn.classList.add('show');
+        } else {
+          backBtn.classList.remove('show');
+        }
+      }
     };
-    scroller.addEventListener('scroll', _scrollHandler, { passive: true });
+    window.addEventListener('scroll', _scrollHandler, { passive: true });
     // 首屏预填充: 内容不足一屏时直接补满, 滚动全程无感续载
     _scrollHandler();
   }

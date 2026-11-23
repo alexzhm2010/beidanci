@@ -471,22 +471,33 @@ input, textarea, select { font-family: inherit; outline: none; }
   /* 书本纸张风格 (Victor .book-list) */
   background:linear-gradient(#fffdf8,#fffaf0); border:1px solid #e9dfc8;
   border-radius:10px; padding:2px 12px; box-shadow:0 2px 14px rgba(90,70,30,.07);
-  max-height: calc(100vh - 280px); overflow-y: auto;
+  /* v1.26.3: 高度自适应, 随内容自然撑开, 整页滚动, 消除与底部 tab 的空白 */
+  overflow: visible;
 }
 .victor-wordlist .vcard-placeholder { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 14px; }
-/* Victor 词库页工具栏: 搜索框 + 功能按钮 + 分数统计 */
-.words-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+/* v1.26.3 词库工具栏: 搜索栏吸顶, 统计并入搜索行, 快捷按钮另起一行随页滚动 */
+.words-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:8px;
+  position:sticky;top:0;z-index:60;background:var(--color-bg);padding:6px 0}
 .search-wrap{position:relative;display:flex;align-items:center;gap:8px;flex:1;min-width:0}
 .search-wrap>svg{position:absolute;left:11px;width:16px;height:16px;stroke:var(--muted);pointer-events:none}
 .search-wrap input{flex:1;min-width:120px;height:40px;border:1px solid rgba(148,180,210,.4);border-radius:10px;
   padding:8px 10px 8px 34px;font-size:14px;background:var(--color-card);font-family:inherit;outline:none}
 .search-wrap input:focus{border-color:var(--ring);box-shadow:0 0 0 3px rgba(123,166,208,.28)}
-.search-wrap .toolbar-buttons{display:flex;gap:5px;flex-wrap:wrap;flex-shrink:0}
+.library-quick-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .list-summary{font-size:13px;color:var(--muted);white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums}
 .list-summary b{color:var(--primary-d);font-size:17px;font-weight:800}
 .list-summary .frac-sep{color:#b9c0cc;margin:0 2px;font-size:14px}
 .victor-wordlist .empty{text-align:center;padding:50px 20px;color:var(--muted)}
 .victor-wordlist .empty svg{width:54px;height:54px;stroke:#c3ccda;margin-bottom:12px}
+/* 回到顶部浮标 (v1.26.3): 仿淘宝右下角回到顶部, 滚动超过一屏淡入 */
+.back-to-top{position:fixed;right:18px;bottom:calc(var(--nav-height,56px) + 20px);z-index:80;
+  width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  background:var(--color-card);color:var(--color-primary);border:1px solid rgba(148,180,210,.5);
+  box-shadow:0 4px 14px rgba(70,115,160,.22);opacity:0;visibility:hidden;transform:translateY(12px);
+  transition:opacity .22s ease,transform .22s ease,visibility .22s ease;cursor:pointer;padding:0}
+.back-to-top.show{opacity:1;visibility:visible;transform:translateY(0)}
+.back-to-top svg{width:22px;height:22px;stroke:currentColor}
+.back-to-top:active{transform:translateY(0) scale(.92)}
 /* 词条：词头一行（深蓝加粗）+ 音标斜体（压紧排版） */
 .victor-wordlist .word-card { border-bottom:1px solid #ece2cc; padding:6px 2px; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
 .victor-wordlist .word-card:last-child { border-bottom:none; }
@@ -552,9 +563,10 @@ input, textarea, select { font-family: inherit; outline: none; }
 .victor-wordlist .gloss { color:var(--muted); font-size:11px; }
 .victor-wordlist .kind { font-size:9px; color:#94a3b8; border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:4px; }
 @media (max-width: 768px) {
-  .victor-wordlist { max-height: calc(100vh - 320px); padding: 6px 10px 10px; }
-  .words-toolbar{flex-wrap:wrap;gap:6px}
-  .search-wrap{flex-wrap:wrap}
-  .search-wrap input{flex-basis:100%}
-  .search-wrap .toolbar-buttons{width:100%}
+  .victor-wordlist { padding: 6px 10px 10px; }
+  .words-toolbar{gap:6px;padding:6px 0}
+  .search-wrap{gap:6px}
+  .search-wrap input{min-width:0}
+  .list-summary{font-size:12px}
+  .list-summary b{font-size:15px}
 }
