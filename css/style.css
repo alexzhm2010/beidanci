@@ -248,8 +248,26 @@ input, textarea, select { font-family: inherit; outline: none; }
 .prof-word-item.answered-familiar { border-left: 3px solid #6c5ce7; }
 .prof-word-top { display: flex; align-items: center; gap: 10px; }
 .prof-word-main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+/* v1.28.0: 词头区域可点击展开详情 */
+.prof-word-expand { cursor: pointer; align-items: center; border-radius: var(--radius-sm); padding: 2px 4px; margin: -2px -4px; transition: background .15s; }
+.prof-word-expand:hover { background: rgba(74, 144, 217, 0.08); }
+.prof-word-expand:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+.prof-expand-arrow { width: 13px; height: 13px; stroke: var(--color-text-lighter); flex-shrink: 0; transition: transform .2s; align-self: center; }
+.prof-word-expand.expanded .prof-expand-arrow { transform: rotate(90deg); }
+.prof-word-expand.has-rich .prof-expand-arrow { stroke: var(--color-primary); }
+.prof-detail-hint { font-size: 10px; color: var(--color-primary); background: rgba(74,144,217,.1); border-radius: 8px; padding: 1px 6px; flex-shrink: 0; }
 .prof-word-text { font-size: 16px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
 .prof-word-phonetic { font-size: 12px; color: var(--color-text-lighter); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* v1.28.0: 词条详情下拉容器 (复用词库 .victor-wordlist 词卡样式) */
+.prof-word-detail { margin: 0 0 2px; padding: 2px 10px 8px; background: var(--color-bg); border-radius: var(--radius-sm); }
+.prof-word-detail[hidden] { display: none; }
+.prof-word-detail .word-card { border-bottom: none; padding: 4px 0 0; }
+.prof-word-detail .word-body { display: block !important; padding: 2px 0 0; }
+.prof-word-detail .word-relations { margin-left: 0; }
+.prof-word-detail .vw-note, .prof-word-detail .item { margin-left: 0; }
+/* 详情里的关系 chip 为静态标签(不集成跳转): 去掉手型与 hover 上浮 */
+.prof-word-detail .rel-chip { cursor: default; }
+.prof-word-detail .rel-chip:hover { transform: none; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
 .prof-word-cn { flex: 1; min-width: 0; font-size: 13px; color: var(--color-text-light); padding: 4px 8px; background: var(--color-bg); border-radius: var(--radius-sm); word-break: break-all; line-height: 1.4; text-align: right; }
 .prof-word-bottom { display: flex; align-items: center; gap: 8px; width: 100%; }
 .prof-word-prof { font-size: 15px; font-weight: 600; flex: 0 0 20%; text-align: center; }
@@ -335,6 +353,7 @@ input, textarea, select { font-family: inherit; outline: none; }
   .prof-word-cn { flex: 1 1 auto; }
   .prof-word-actions .btn-sm { padding: 12px 8px; font-size: 16px; min-height: 44px; }
   .prof-word-prof { font-size: 14px; }
+  .prof-word-detail { padding: 2px 6px 8px; }
   .yearly-nav { gap: 8px; }
   @keyframes toastSlideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 }

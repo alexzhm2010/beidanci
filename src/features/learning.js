@@ -305,7 +305,7 @@ App.Learning = (function () {
         return pa - pb;
       });
 
-      openProficiencyWindow(filtered, range);
+      await openProficiencyWindow(filtered, range);
     } catch (e) {
       App.showToast('加载单词失败: ' + e.message, 'error');
     }
@@ -338,10 +338,43 @@ App.Learning = (function () {
       });
 
       var label = letter === '#' ? '#其他' : '字母 ' + letter;
-      openProficiencyWindow(filtered, null, label + ' 未掌握', renderLetterStats);
+      await openProficiencyWindow(filtered, null, label + ' 未掌握', renderLetterStats);
     } catch (e) {
       App.showToast('加载单词失败: ' + e.message, 'error');
     }
+  }
+
+  // ========== v1.28.0: 复习列表词条下拉详情 (复用词库词卡富内容) ==========
+
+  /** 按需确保 Library 富内容词库已就绪 (学习页独立入口, 可能词库模块尚未加载) */
+  async function ensureRichLibrary() {
+    try {
+      if (!App.Library || typeof App.Library.getEnrichedWords !== 'function') {
+        await import('./library.js');
+      }
+      if (App.Library && typeof App.Library.getEnrichedWords === 'function') {
+        return await App.Library.getEnrichedWords();
+      }
+    } catch (e) {
+      console.warn('[ReviewDetail] 富内容词库加载失败, 详情将降级为普通释义', e);
+    }
+    return [];
+  }
+
+  /** 把富内容词库按词头建立索引 (小写归一), 供复习词条 O(1) 匹配 */
+  function buildRichIndex(richWords) {
+    var idx = {};
+    (richWords || []).forEach(function (r) {
+      var key = String(r.headword || r.word || '').trim().toLowerCase();
+      if (key && !idx[key]) idx[key] = r;
+    });
+    return idx;
+  }
+
+  /** 取某复习词对应的富内容对象 (带 senses/notes/relations), 找不到返回 null */
+  function richOf(word, richIdx) {
+    var key = String(word.word || '').trim().toLowerCase();
+    return richIdx[key] || null;
   }
 
   /** 打开全屏熟练度复习窗口
@@ -350,7 +383,7 @@ App.Learning = (function () {
    * @param customTitle 可选, 覆盖默认标题
    * @param onClose  可选, 弹窗关闭后的回调
    */
-  function openProficiencyWindow(words, range, customTitle, onClose) {
+  async function openProficiencyWindow(words, range, customTitle, onClose) {
     var rangeLabels = {
       '0-40': '熟练度<40%',
       '40-60': '熟练度40~60%',
@@ -363,6 +396,9 @@ App.Learning = (function () {
     overlay.id = 'proficiencyOverlay';
 
     var esc = App.Utils.escapeHtml;
+
+    // v1.28.0: 加载词库富内容(带 senses/notes/relations), 供词条下拉详情原样复用
+    var richIdx = buildRichIndex(await ensureRichLibrary());
 
     // v1.18.1: 把"会拼写"冻结词稳定分区到列表末尾 (组内保留原有熟练度升序)
     var activeWords = [];
@@ -386,14 +422,21 @@ App.Learning = (function () {
             '<button class="btn btn-success btn-sm prof-btn-yes" data-word-id="' + w.id + '" data-idx="' + idx + '">认识</button>' +
             '<button class="btn btn-familiar btn-sm prof-btn-familiar" data-word-id="' + w.id + '" data-idx="' + idx + '">会拼写</button>' +
           '</div>';
+      // v1.28.0: 词头区域可点击展开详情 (复用词库词卡富内容, 派生跳转不集成)
+      var hasRich = !!richOf(w, richIdx);
+      var wordMain = '<div class="prof-word-main prof-word-expand' + (hasRich ? ' has-rich' : '') + '"' +
+        ' data-detail-toggle="' + idx + '" role="button" aria-expanded="false" tabindex="0">' +
+        '<svg class="prof-expand-arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
+        '<div class="prof-word-text">' + esc(w.word) + '</div>' +
+        '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
+        (hasRich ? '<span class="prof-detail-hint">详情</span>' : '') +
+      '</div>';
       return '<div class="prof-word-item' + (frozen ? ' is-locked' : '') + '" data-idx="' + idx + '" data-word-id="' + w.id + '">' +
         '<div class="prof-word-top">' +
-          '<div class="prof-word-main">' +
-            '<div class="prof-word-text">' + esc(w.word) + '</div>' +
-            '<div class="prof-word-phonetic">' + esc(w.phonetic || '') + '</div>' +
-          '</div>' +
+          wordMain +
           '<div class="prof-word-cn hidden">' + esc(w.chineseMeaning || '') + '</div>' +
         '</div>' +
+        '<div class="prof-word-detail victor-wordlist" data-detail-body="' + idx + '" hidden></div>' +
         '<div class="prof-word-bottom">' +
           '<div class="prof-word-prof" style="color:' + profColor + ';">' + prof + '%</div>' +
           rightHTML +
@@ -439,9 +482,43 @@ App.Learning = (function () {
       closeProficiencyWindow();
     });
 
-    // 不认识/认识/会拼写 按钮 (事件委托)
+    // 不认识/认识/会拼写 按钮 + 词条详情展开 (事件委托)
     var listEl = document.getElementById('proficiencyList');
+
+    // v1.28.0: 展开/收起词条详情 (惰性渲染, 首次展开才生成富内容 DOM)
+    function toggleDetail(idx) {
+      var main = listEl.querySelector('.prof-word-expand[data-detail-toggle="' + idx + '"]');
+      var body = listEl.querySelector('.prof-word-detail[data-detail-body="' + idx + '"]');
+      if (!main || !body) return;
+      var willOpen = body.hasAttribute('hidden');
+      if (willOpen) {
+        if (!body.dataset.rendered) {
+          var w = profState.words[idx];
+          var rich = richOf(w, richIdx);
+          // 与词库页同款渲染; 派生跳转不集成(noJump 由 renderVictorBody 内部处理)
+          body.innerHTML = rich
+            ? App.Utils.renderVictorBody(rich)
+            : '<div style="font-size:13px;color:var(--muted);padding:8px 0">' +
+                (w.chineseMeaning ? esc(w.chineseMeaning) : '（无详细义项）') + '</div>';
+          body.dataset.rendered = '1';
+        }
+        body.removeAttribute('hidden');
+        main.classList.add('expanded');
+        main.setAttribute('aria-expanded', 'true');
+      } else {
+        body.setAttribute('hidden', '');
+        main.classList.remove('expanded');
+        main.setAttribute('aria-expanded', 'false');
+      }
+    }
+
     listEl.addEventListener('click', function (e) {
+      // 详情展开优先 (词头区域)
+      var toggle = e.target.closest('.prof-word-expand[data-detail-toggle]');
+      if (toggle) {
+        toggleDetail(parseInt(toggle.dataset.detailToggle));
+        return;
+      }
       var btn = e.target.closest('.prof-btn-yes, .prof-btn-no, .prof-btn-familiar');
       if (!btn) return;
       var idx = parseInt(btn.dataset.idx);
@@ -449,6 +526,14 @@ App.Learning = (function () {
       var answer = btn.classList.contains('prof-btn-familiar') ? 'familiar'
         : btn.classList.contains('prof-btn-yes') ? 'known' : 'unknown';
       handleProfAnswer(idx, wordId, answer, profState);
+    });
+    // 键盘可达: 词头回车/空格展开
+    listEl.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      var toggle = e.target.closest('.prof-word-expand[data-detail-toggle]');
+      if (!toggle) return;
+      e.preventDefault();
+      toggleDetail(parseInt(toggle.dataset.detailToggle));
     });
 
     // 边界: 若全部词都在锁定期 (无可答题), 直接显示总结, 避免用户卡在无按钮界面

@@ -461,6 +461,25 @@ App.Library = (function () {
     });
   }
 
+  // v1.28.0: 对外提供「带富内容的全量词库」(words + Victor 四表 join + 关系网)。
+  // 供学习页熟练度/字母复习列表下拉详情复用; 命中缓存即返回, 否则等待预取或主动拉一次。
+  async function getEnrichedWords() {
+    if (_hasCache && allWords && allWords.length) return allWords;
+    // 正在后台预取/加载: 短暂轮询等待其完成 (最多 ~3s), 复用同一份数据避免重复请求
+    var waited = 0;
+    while ((_refreshing || isLoading) && waited < 3000) {
+      await new Promise(function (r) { setTimeout(r, 100); });
+      waited += 100;
+      if (_hasCache && allWords && allWords.length) return allWords;
+    }
+    // 仍未拿到缓存: 主动拉一次并写入缓存
+    var built = await fetchAllWords();
+    allWords = built;
+    _hasCache = true;
+    _lastSignature = signatureOf(built);
+    return built;
+  }
+
   // 依据搜索词过滤 (复刻 Victor computeFiltered: 英文词头 + 中文释义)
   function computeFiltered() {
     var q = (currentQuery || '').trim().toLowerCase();
@@ -1708,6 +1727,7 @@ App.Library = (function () {
     buildRelationGraph: buildRelationGraph,
     relationsOf: relationsOf,
     normHw: normHw,
+    getEnrichedWords: getEnrichedWords,
   };
 })();
 

@@ -111,13 +111,14 @@ App.Utils = {
   },
 
   /**
-   * v1.24.0: 一比一复刻 Victor app.js wordCardHtml —— 数据结构也对齐 Victor。
-   * 数据源为 uw_* 四表的嵌套查询结果 (headword/senses/examples/notes 与 Victor 底座完全同名),
-   * 不再读 detail JSONB 快照, 富内容信息零丢失。
-   * 保留 Victor 词卡 DOM 全部元素 (含 word-actions 三态按钮/长按事件属性),
-   * 仅三态徽标按用户要求换成熟练度徽标; 三态持久化/A-Z/关系网/长按交互不接逻辑。
+   * v1.28.0: 组装 Victor 词卡的所有内容片段 (词库整卡 / 学习页下拉详情共用同一套渲染)。
+   * opts.noJump=true 时关系网 chip 渲染为静态 span (无 data-jump), 供学习页复习列表下拉使用;
+   * 词库页调用 renderVictorCard 时 noJump=false, 跳转行为与旧版完全一致。
+   * 数据结构为 uw_* 四表嵌套查询结果 (headword/senses/examples/notes 与 Victor 底座同名)。
    */
-  renderVictorCard: function (w) {
+  _composeVictor: function (w, opts) {
+    opts = opts || {};
+    var noJump = !!opts.noJump;
     var esc = App.Utils.escapeHtml;
     var senses = Array.isArray(w.senses) ? w.senses : [];
     var notes = Array.isArray(w.notes) ? w.notes : [];
@@ -210,7 +211,7 @@ App.Utils = {
       return '<div class="vw-note note-' + esc(t) + '"><span class="note-badge">' + esc(t) + '</span>' + title + '<div class="note-body">' + content + '</div></div>';
     }).join('');
 
-    // ---- 词间关系网 chips (v1.26.6: 复刻 Victor relationsHtml, 点击可跳转对应词卡) ----
+    // ---- 词间关系网 chips (复刻 Victor relationsHtml; noJump 时 chip 静态展示, 无跳转) ----
     var REL_META = {
       '派生': { cls: 'rel-derive', ico: '↳', label: '派生' },
       '同义': { cls: 'rel-syn', ico: '≈', label: '同义' },
@@ -225,11 +226,13 @@ App.Utils = {
       if (!items || !items.length) return;
       var meta = REL_META[type];
       var chips = items.map(function (it) {
-        if (it.inLib) {
+        if (it.inLib && !noJump) {
           return '<button type="button" class="rel-chip ' + meta.cls + '" data-jump="' + esc(it.hw) +
             '" title="跳转到 ' + esc(it.hw) + '">' + esc(it.hw) + '</button>';
         }
-        return '<span class="rel-chip rel-ext" title="关联词，尚未收录">' + esc(it.hw) + '</span>';
+        // noJump 或库外词: 静态 chip, 保留配色与词头文字, 不带 data-jump
+        return '<span class="rel-chip ' + (it.inLib ? meta.cls : 'rel-ext') + '"' +
+          (it.inLib ? '' : ' title="关联词，尚未收录"') + '>' + esc(it.hw) + '</span>';
       }).join('');
       relParts.push('<span class="rel-group"><span class="rel-label">' + meta.ico + ' ' + meta.label + '</span>' + chips + '</span>');
     });
@@ -242,42 +245,67 @@ App.Utils = {
       ? Math.round((w.knownCount / w.totalCount) * 100) + '%' : '-';
     var profTag = '<span class="study-tag custom" title="熟练度">' + esc(level.label + ' ' + profText) + '</span>';
 
-    // v1.24.0: 一比一复刻 Victor wordCardHtml —— 所有词卡都可点击展开,
-    // 无富内容时 body 显示一行中文释义。
+    // v1.24.0: 一比一复刻 Victor wordCardHtml —— 无富内容时 body 显示一行中文释义。
     var bodyHtml = (sensesHtml || notesHtml)
       ? (sensesHtml + notesHtml)
       : '<div style="font-size:13px;color:var(--muted);padding:8px 0">' +
           (w.chineseMeaning ? esc(w.chineseMeaning) : '（无详细义项）') + '</div>';
 
-    var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.headword));
+    var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.headword || w.word));
     var isProgress = w.totalCount > 0 && (w.knownCount / w.totalCount) >= 0.8;
+
+    return {
+      esc: esc, sensesHtml: sensesHtml, wordDefHtml: wordDefHtml,
+      page: page, partialTag: partialTag, identityTag: identityTag, derivedTag: derivedTag,
+      notesHtml: notesHtml, relationsHtml: relationsHtml, profTag: profTag,
+      bodyHtml: bodyHtml, key: key, isProgress: isProgress,
+    };
+  },
+
+  /**
+   * v1.24.0: 一比一复刻 Victor app.js wordCardHtml —— 数据结构也对齐 Victor。
+   * 词库页调用: 保留关系网跳转, 行为与旧版完全一致。
+   */
+  renderVictorCard: function (w) {
+    var p = App.Utils._composeVictor(w, { noJump: false });
+    var esc = p.esc;
     // Victor 原版 word-actions 三态按钮 DOM (保留视觉, 交互逻辑按用户要求不接)
     var actionsHtml = '<div class="word-actions">' +
       '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✓</span>已会</button>' +
       '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✕</span>不会</button>' +
       '<button class="act-btn" type="button" tabindex="-1"><span class="ico">📍</span>进度</button>' +
       '</div>';
-    return '<div class="word-card' + (isProgress ? ' is-progress' : '') + '"' +
-      ' id="wc-' + key + '" data-word-id="' + esc(w.id) + '"' +
+    return '<div class="word-card' + (p.isProgress ? ' is-progress' : '') + '"' +
+      ' id="wc-' + p.key + '" data-word-id="' + esc(w.id) + '"' +
       ' data-derived="' + (w.derived_from ? '1' : '0') + '">' +
       '<div class="word-row"><div class="word-swipe">' +
-        '<div class="word-hd" data-expandable="1" data-key="' + key + '" role="button" aria-expanded="false" tabindex="0">' +
+        '<div class="word-hd" data-expandable="1" data-key="' + p.key + '" role="button" aria-expanded="false" tabindex="0">' +
           '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
           '<span class="word-name">' + esc(w.headword) + '</span>' +
           '<span class="word-ph">' + esc(w.phonetic || '') + '</span>' +
-          profTag + identityTag + derivedTag + page + partialTag +
-          wordDefHtml +
+          p.profTag + p.identityTag + p.derivedTag + p.page + p.partialTag +
+          p.wordDefHtml +
         '</div>' + actionsHtml +
       '</div></div>' +
-      '<div class="word-body">' + bodyHtml + relationsHtml + '</div>' +
+      '<div class="word-body">' + p.bodyHtml + p.relationsHtml + '</div>' +
     '</div>';
+  },
+
+  /**
+   * v1.28.0: 只渲染词卡的「详情正文」(义项/例句/蓝底注释/关系网 chips), 供学习页复习列表下拉复用。
+   * 与词库页共用 _composeVictor, 样式和内容 100% 一致 (.victor-wordlist 作用域);
+   * 唯一差异: 关系网 chip 不带跳转 (noJump=true), 其余反义/高考/辨析/同义等内容全部保留。
+   */
+  renderVictorBody: function (w) {
+    var p = App.Utils._composeVictor(w, { noJump: true });
+    return '<div class="word-body">' + p.bodyHtml + p.relationsHtml + '</div>';
   },
 };
 
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.27.0',
+  APP_VERSION: '1.28.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',
