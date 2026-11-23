@@ -802,6 +802,7 @@ App.DB = (function () {
         inline_def: r.inline_def || '',
         identity_tag: r.identity_tag || '',
         derived_from: r.derived_from || '',
+        parent_word_id: r.parent_word_id || null,
         page_no: r.page_no || null,
         partial: !!r.partial,
         tags: Array.isArray(r.tags) ? r.tags : [],

@@ -210,6 +210,32 @@ App.Utils = {
       return '<div class="vw-note note-' + esc(t) + '"><span class="note-badge">' + esc(t) + '</span>' + title + '<div class="note-body">' + content + '</div></div>';
     }).join('');
 
+    // ---- 词间关系网 chips (v1.26.6: 复刻 Victor relationsHtml, 点击可跳转对应词卡) ----
+    var REL_META = {
+      '派生': { cls: 'rel-derive', ico: '↳', label: '派生' },
+      '同义': { cls: 'rel-syn', ico: '≈', label: '同义' },
+      '同族': { cls: 'rel-family', ico: '⁂', label: '同族' },
+      '辨析': { cls: 'rel-diff', ico: '⚖', label: '辨析' },
+      '反义': { cls: 'rel-ant', ico: '↔', label: '反义' },
+    };
+    var relations = w.relations || {};
+    var relParts = [];
+    Object.keys(REL_META).forEach(function (type) {
+      var items = relations[type];
+      if (!items || !items.length) return;
+      var meta = REL_META[type];
+      var chips = items.map(function (it) {
+        if (it.inLib) {
+          return '<button type="button" class="rel-chip ' + meta.cls + '" data-jump="' + esc(it.hw) +
+            '" title="跳转到 ' + esc(it.hw) + '">' + esc(it.hw) + '</button>';
+        }
+        return '<span class="rel-chip rel-ext" title="关联词，尚未收录">' + esc(it.hw) + '</span>';
+      }).join('');
+      relParts.push('<span class="rel-group"><span class="rel-label">' + meta.ico + ' ' + meta.label + '</span>' + chips + '</span>');
+    });
+    var relationsHtml = relParts.length
+      ? '<div class="word-relations">' + relParts.join('') + '</div>' : '';
+
     // ---- 熟练度徽标 (替代 Victor 三态) ----
     var level = App.Algorithm.getProficiencyLevel(w);
     var profText = w.totalCount > 0
@@ -243,7 +269,7 @@ App.Utils = {
           wordDefHtml +
         '</div>' + actionsHtml +
       '</div></div>' +
-      '<div class="word-body">' + bodyHtml + '</div>' +
+      '<div class="word-body">' + bodyHtml + relationsHtml + '</div>' +
     '</div>';
   },
 };
@@ -251,7 +277,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.26.5',
+  APP_VERSION: '1.26.6',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

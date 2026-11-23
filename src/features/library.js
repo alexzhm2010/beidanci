@@ -110,6 +110,13 @@ App.Library = (function () {
 
     // 事件委托: 点词头展开/收起 (复刻 Victor toggleCard; 所有词卡均可展开)
     document.getElementById('wordCardList').addEventListener('click', function (e) {
+      // v1.26.6: 关系网 chip 点击 → 跳转对应词卡 (优先于词头展开)
+      var chip = e.target.closest('.rel-chip[data-jump]');
+      if (chip) {
+        e.stopPropagation();
+        jumpToWord(chip.getAttribute('data-jump'));
+        return;
+      }
       var head = e.target.closest('.word-hd[data-expandable="1"]');
       if (head) toggleCard(head.getAttribute('data-key'));
     });
@@ -132,11 +139,145 @@ App.Library = (function () {
     if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
+  // v1.26.6 关系网跳转 (复刻 Victor jumpToWord): 定位→清筛选→补渲染→滚动→展开→高亮
+  function jumpToWord(headword) {
+    var norm = normHw(headword);
+    var target = null;
+    for (var i = 0; i < allWords.length; i++) {
+      if (normHw(allWords[i].headword) === norm) { target = allWords[i]; break; }
+    }
+    if (!target) { App.showToast('词库中还没有「' + headword + '」', 'info'); return; }
+
+    // 若目标被搜索词隐藏, 先清掉搜索让它出现
+    var q = document.getElementById('searchInput');
+    var qVal = (q && q.value || '').trim();
+    var hiddenBySearch = qVal && String(target.headword).toLowerCase().indexOf(qVal.toLowerCase()) === -1
+      && String(target.chineseMeaning || '').indexOf(qVal) === -1;
+    if (hiddenBySearch && q) { q.value = ''; currentQuery = ''; }
+    if (hiddenBySearch) resetWordList();
+
+    // 确保目标已渲染 (无限滚动可能还没渲染到)
+    var idx = -1;
+    for (var j = 0; j < filteredWords.length; j++) {
+      if (String(filteredWords[j].id) === String(target.id)) { idx = j; break; }
+    }
+    if (idx < 0) {
+      for (var k = 0; k < filteredWords.length; k++) {
+        if (normHw(filteredWords[k].headword) === norm) { idx = k; break; }
+      }
+    }
+    if (idx < 0) { App.showToast('未找到「' + headword + '」', 'info'); return; }
+    var guard = 0;
+    while (renderedCount <= idx && guard++ < 500) appendWords();
+
+    var key = target.id != null ? ('id' + target.id) : ('hw' + App.Utils.escapeHtml(target.headword));
+    var el = document.getElementById('wc-' + key);
+    if (!el) { App.showToast('「' + headword + '」尚未加载', 'info'); return; }
+    el.classList.add('open', 'jump-flash');
+    var head = el.querySelector('.word-hd');
+    if (head) head.setAttribute('aria-expanded', 'true');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(function () { el.classList.remove('jump-flash'); }, 1600);
+  }
+
 
   async function show() {
     document.getElementById('searchInput').value = currentQuery;
     // 每次进入词库页都重新拉全量, 保证与外部(同步/学习)改动一致
     await loadWords(currentQuery);
+  }
+
+  // ========== 词间关系网 (v1.26.6: 复刻 Victor buildRelationGraph, 用词头匹配以适配 beidanci 的 id 体系) ==========
+  // 关系来源与 Victor 完全一致:
+  //   - 派生: derived_from(本词派生自谁) + parent_word_id(谁派生自本词, 反向)
+  //   - 反义: sense.antonym
+  //   - 同义/辨析/同族: notes 里 note_type ∈ {同,辨,同族词} 的 title 词清单
+  // beidanci 的 allWords id 是用户 words 表 id, 与 Victor 底座 parent_word_id 不同体系,
+  // 故统一用 normHw(词头) 作为匹配键, 双向都可靠。
+
+  // 归一化词头: 去身份符号/非字母, 与 Victor normHw 一致
+  function normHw(s) {
+    return String(s || '').toLowerCase().replace(/^[*⊕⊖▶▼\s]+/, '').replace(/[^a-z]/g, '');
+  }
+  // 拆词清单: "above, on, over" → ['above','on','over']
+  function splitWordList(s) {
+    return String(s || '').split(/[,，、;；\/]+/)
+      .map(function (x) { return x.trim().replace(/^(同族词|同|辨|反)[:：]?\s*/, ''); })
+      .map(function (x) { return x.replace(/\s*\(.*?\)\s*/g, '').trim(); })
+      .filter(function (x) { return /^[A-Za-z][A-Za-z\-' ]*$/.test(x) && x.length <= 30; });
+  }
+
+  var relGraph = { adj: {} };   // adj[norm] = [{ hw, type, inLib }]
+
+  // 由当前全量词库构建关系网 (每次 loadWords 后重建)
+  function buildRelationGraph(words) {
+    var byNorm = {};
+    words.forEach(function (w) {
+      var n = normHw(w.headword);
+      if (n && !byNorm[n]) byNorm[n] = w;   // 词头 → 词 (取首个)
+    });
+    var adj = {};
+    var addEdge = function (w, targetHw, type) {
+      var fromNorm = normHw(w.headword);
+      if (!fromNorm) return;
+      var tNorm = normHw(targetHw);
+      var target = tNorm ? byNorm[tNorm] : null;
+      var hw = target ? target.headword : String(targetHw || '').trim();
+      if (!hw || tNorm === fromNorm) return;
+      var item = { hw: hw, type: type, inLib: !!target };
+      if (!adj[fromNorm]) adj[fromNorm] = [];
+      adj[fromNorm].push(item);
+      // 反向: 库内词互相都能看到这条关系 (支持母词→派生词跳转)
+      if (target) {
+        if (!adj[tNorm]) adj[tNorm] = [];
+        adj[tNorm].push({ hw: w.headword, type: type, inLib: true });
+      }
+    };
+    words.forEach(function (w) {
+      // 派生: 本词派生自谁
+      if (w.derived_from) addEdge(w, w.derived_from, '派生');
+      // 反义: 义项 antonym (去掉"反"前缀再拆)
+      (Array.isArray(w.senses) ? w.senses : []).forEach(function (s) {
+        if (s.antonym) {
+          splitWordList(String(s.antonym).replace(/^反[:：]?\s*/, '')).forEach(function (p) {
+            addEdge(w, p, '反义');
+          });
+        }
+      });
+      // 同义/辨析/同族/反: notes 的 title 词清单
+      (Array.isArray(w.notes) ? w.notes : []).forEach(function (n) {
+        var t = String(n.note_type || '').trim();
+        var type = null;
+        if (t === '同') type = '同义';
+        else if (t === '辨') type = '辨析';
+        else if (t === '反') type = '反义';
+        else if (t === '同族词') type = '同族';
+        if (type) splitWordList(n.title || '').forEach(function (p) { addEdge(w, p, type); });
+      });
+    });
+    // 每类按词头去重
+    Object.keys(adj).forEach(function (k) {
+      var seen = {};
+      adj[k] = adj[k].filter(function (x) {
+        var kk = x.type + '|' + normHw(x.hw);
+        if (seen[kk]) return false;
+        seen[kk] = true;
+        return true;
+      });
+    });
+    relGraph = { adj: adj };
+  }
+
+  // 取某词的关系摘要: { type: [{ hw, inLib }] }
+  function relationsOf(w) {
+    var n = normHw(w.headword);
+    var list = (relGraph.adj && relGraph.adj[n]) || [];
+    var out = {};
+    list.forEach(function (x) {
+      if (!out[x.type]) out[x.type] = [];
+      out[x.type].push({ hw: x.hw, inLib: x.inLib });
+    });
+    return out;
   }
 
   // ========== 搜索 & 渲染 (v1.23.0: 复刻 Victor 全量 + A-Z + 无限滚动) ==========
@@ -177,6 +318,7 @@ App.Library = (function () {
           inline_def: rich ? rich.inline_def : '',
           identity_tag: rich ? rich.identity_tag : '',
           derived_from: rich ? rich.derived_from : '',
+          parent_word_id: rich ? rich.parent_word_id : null,
           page_no: rich ? rich.page_no : null,
           partial: rich ? !!rich.partial : false,
           senses: rich ? rich.senses : [],
@@ -185,6 +327,9 @@ App.Library = (function () {
           knownCount: w.knownCount || 0,
         };
       });
+      // v1.26.6: 构建词间关系网并挂到每个词 (供关系 chips + 点击跳转)
+      buildRelationGraph(allWords);
+      allWords.forEach(function (w) { w.relations = relationsOf(w); });
       // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
       allWords.sort(function (a, b) {
         var ka = String(a.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
@@ -1454,6 +1599,10 @@ App.Library = (function () {
     show: show,
     loadWords: loadWords,
     toggleCard: toggleCard,
+    jumpToWord: jumpToWord,
+    buildRelationGraph: buildRelationGraph,
+    relationsOf: relationsOf,
+    normHw: normHw,
   };
 })();
 

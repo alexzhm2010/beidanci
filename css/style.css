@@ -498,6 +498,26 @@ input, textarea, select { font-family: inherit; outline: none; }
 .back-to-top.show{opacity:1;visibility:visible;transform:translateY(0)}
 .back-to-top svg{width:22px;height:22px;stroke:currentColor}
 .back-to-top:active{transform:translateY(0) scale(.92)}
+/* 词间关系网 chips (v1.26.6: 复刻 Victor, 点击可跳转到对应词卡) */
+.victor-wordlist .word-relations{display:flex;flex-direction:column;gap:5px;margin:9px 0 2px 8px;padding:8px 10px;
+  background:linear-gradient(135deg,#f7fbff,#f0f6ff);border:1px solid #d9e7f7;border-radius:8px}
+.victor-wordlist .rel-group{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.victor-wordlist .rel-label{font-size:10.5px;font-weight:700;color:#64748b;min-width:38px;white-space:nowrap}
+.victor-wordlist .rel-chip{display:inline-flex;align-items:center;border:1px solid transparent;border-radius:11px;
+  min-height:22px;padding:2px 9px;font-size:11.5px;font-family:inherit;cursor:pointer;
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.05);transition:transform .12s,box-shadow .12s}
+.victor-wordlist .rel-chip:hover{transform:translateY(-1px);box-shadow:0 2px 7px rgba(0,0,0,.12)}
+.victor-wordlist .rel-chip.rel-derive{color:#6d28d9;border-color:#ddd0f5;background:#faf7ff}
+.victor-wordlist .rel-chip.rel-syn{color:#0e7490;border-color:#b6e3ea;background:#f2fbfd}
+.victor-wordlist .rel-chip.rel-family{color:#0369a1;border-color:#b9d9f2;background:#f3f9ff}
+.victor-wordlist .rel-chip.rel-diff{color:#b45309;border-color:#f3dcb2;background:#fffbf3}
+.victor-wordlist .rel-chip.rel-ant{color:#be185d;border-color:#f5c6dc;background:#fff5f9}
+.victor-wordlist .rel-chip.rel-ext{color:#94a3b8;border-style:dashed;cursor:default;background:transparent}
+.victor-wordlist .rel-chip.rel-ext:hover{transform:none;box-shadow:none}
+@keyframes jumpPulse{0%{box-shadow:0 0 0 0 rgba(37,99,235,.55);background:rgba(219,234,254,.7)}
+  70%{box-shadow:0 0 0 10px rgba(37,99,235,0);background:rgba(219,234,254,.35)}
+  100%{box-shadow:0 0 0 0 rgba(37,99,235,0);background:transparent}}
+.victor-wordlist .word-card.jump-flash{animation:jumpPulse 1.6s ease-out;border-radius:6px}
 /* 词条：词头一行（深蓝加粗）+ 音标斜体（压紧排版） */
 .victor-wordlist .word-card { border-bottom:1px solid #ece2cc; padding:6px 2px; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
 .victor-wordlist .word-card:last-child { border-bottom:none; }
