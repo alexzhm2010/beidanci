@@ -778,6 +778,53 @@ App.DB = (function () {
     return { words: words, total: total };
   }
 
+  /**
+   * v1.24.0: 从用户私有 Victor 四表 (uw_*) 嵌套查询拉全量词。
+   * 字段与 Victor 底座 100% 同名, 供词库页 wordCardHtml 原版渲染, 无快照信息丢失。
+   * 用 PostgREST 嵌套 select 带出 senses -> examples 与 notes; fetchAllPages 保证 >1000 条拉全。
+   */
+  async function getVictorWords() {
+    var code = getSyncCode();
+    var select = 'id,headword,phonetic,level_tag,inline_def,identity_tag,derived_from,page_no,partial,audio,freq_level,parent_word_id,tags,' +
+      'uw_senses(id,pos,sense_no,sense_freq,countability,usage_label,chinese_def,english_def,antonym,' +
+      'uw_examples(id,kind,parent_phrase,usage_label,en,zh,gloss,source)),' +
+      'uw_notes(id,note_type,title,content)';
+    var base = 'sync_code=eq.' + encodeURIComponent(code) +
+      '&select=' + encodeURIComponent(select) +
+      '&order=id';
+    // fetchAllPages 默认 pageSize=1000; 嵌套富内容较大, 降到 300 降低单次响应体
+    return await fetchAllPages('uw_words', base, function (r) {
+      return {
+        id: r.id,
+        headword: r.headword || '',
+        phonetic: r.phonetic || '',
+        level_tag: r.level_tag || '',
+        inline_def: r.inline_def || '',
+        identity_tag: r.identity_tag || '',
+        derived_from: r.derived_from || '',
+        page_no: r.page_no || null,
+        partial: !!r.partial,
+        tags: Array.isArray(r.tags) ? r.tags : [],
+        senses: (Array.isArray(r.uw_senses) ? r.uw_senses : []).map(function (s) {
+          return {
+            pos: s.pos || '', sense_no: s.sense_no || 0, sense_freq: s.sense_freq || 0,
+            countability: s.countability || '', usage_label: s.usage_label || '',
+            chinese_def: s.chinese_def || '', english_def: s.english_def || '', antonym: s.antonym || '',
+            examples: (Array.isArray(s.uw_examples) ? s.uw_examples : []).map(function (e) {
+              return {
+                kind: e.kind || 'sentence', parent_phrase: e.parent_phrase || '', usage_label: e.usage_label || '',
+                en: e.en || '', zh: e.zh || '', gloss: e.gloss || '', source: e.source || ''
+              };
+            })
+          };
+        }),
+        notes: (Array.isArray(r.uw_notes) ? r.uw_notes : []).map(function (n) {
+          return { note_type: n.note_type || '注', title: n.title || '', content: n.content || '' };
+        }),
+      };
+    }, 300, 5);
+  }
+
   /** 批量导入: mode = 'overwrite' | 'incremental' */
   async function addWordsBatch(words, mode) {
     var uid = getUserId();
@@ -1361,6 +1408,7 @@ App.DB = (function () {
     getWord: getWord,
     findWordByText: findWordByText,
     getAllWords: getAllWords,
+    getVictorWords: getVictorWords,
     getNewWords: getNewWords,
     getReviewCandidates: getReviewCandidates,
     getLearnedWords: getLearnedWords,

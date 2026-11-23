@@ -1,7 +1,8 @@
 /**
- * Victor 词库同步 Edge Function (v1.21.0)
+ * Victor 词库同步 Edge Function (v1.24.0)
  *
- * 作用: 把共享底座词库(vw_*) 全量同步到指定用户私有词库(words), 后端执行, 不依赖浏览器常驻。
+ * 作用: 把共享底座词库(vw_* 四表) 整份复制到指定用户私有四表(uw_*), 后端执行, 不依赖浏览器常驻。
+ *       v1.24.0 起废弃 detail JSONB 快照, 富内容改为结构化四表, 与 Victor 底座字段 100% 一致。
  * 触发: 前端点「同步 Victor」→ POST { syncCode }
  *
  * 执行模型:
@@ -98,22 +99,21 @@ async function runSync(jobId: string, syncCode: string): Promise<void> {
     await updateJob(jobId, { status: "running", total });
 
     let offset = 0;
-    let added = 0, enriched = 0, processed = 0;
+    let processed = 0;
 
     // 最多 100 批 (2 万词上限), 防止异常死循环
+    // v1.24.0: 调用 victor_copy_batch, 把底座四表整份复制到用户私有 uw_* 四表
     for (let i = 0; i < 100; i++) {
-      const res = await rpc("victor_sync_batch", { p_sync_code: syncCode, p_offset: offset, p_limit: BATCH });
+      const res = await rpc("victor_copy_batch", { p_sync_code: syncCode, p_offset: offset, p_limit: BATCH });
       const row = Array.isArray(res) ? res[0] : res;
       const done = Number(row?.processed || 0);
-      added += Number(row?.added || 0);
-      enriched += Number(row?.enriched || 0);
       processed += done;
       offset += done;
-      await updateJob(jobId, { processed, added, enriched });
+      await updateJob(jobId, { processed, added: processed, enriched: 0 });
       if (done < BATCH) break; // 最后一批
     }
 
-    await updateJob(jobId, { status: "done", processed, added, enriched });
+    await updateJob(jobId, { status: "done", processed, added: processed, enriched: 0 });
   } catch (e) {
     await updateJob(jobId, { status: "failed", error: String(e?.message || e).slice(0, 500) });
   }

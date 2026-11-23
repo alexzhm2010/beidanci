@@ -111,15 +111,16 @@ App.Utils = {
   },
 
   /**
-   * v1.22.1: 原样移植 Victor 词库卡片 DOM 结构 (一比一复刻 app.js wordCardHtml)。
-   * 数据源为 beidanci 词对象 + detail 快照 (字段名与 Victor 一致)。
-   * 差异: 三态徽标 → beidanci 熟练度徽标; 去掉左滑操作区/关系网跳转 (依赖 Victor 全局状态)。
+   * v1.24.0: 一比一复刻 Victor app.js wordCardHtml —— 数据结构也对齐 Victor。
+   * 数据源为 uw_* 四表的嵌套查询结果 (headword/senses/examples/notes 与 Victor 底座完全同名),
+   * 不再读 detail JSONB 快照, 富内容信息零丢失。
+   * 保留 Victor 词卡 DOM 全部元素 (含 word-actions 三态按钮/长按事件属性),
+   * 仅三态徽标按用户要求换成熟练度徽标; 三态持久化/A-Z/关系网/长按交互不接逻辑。
    */
   renderVictorCard: function (w) {
     var esc = App.Utils.escapeHtml;
-    var detail = (w.detail && typeof w.detail === 'object') ? w.detail : {};
-    var senses = Array.isArray(detail.senses) ? detail.senses : [];
-    var notes = Array.isArray(detail.notes) ? detail.notes : [];
+    var senses = Array.isArray(w.senses) ? w.senses : [];
+    var notes = Array.isArray(w.notes) ? w.notes : [];
 
     // ---- 义项 (复刻 Victor: 实心序号 + 词性 + 标签 + 英释 + 例句/短语) ----
     var sensesHtml = senses.map(function (s) {
@@ -174,8 +175,8 @@ App.Utils = {
         .replace(/(?:n|v|vt|vi|adj|adv|prep|conj|pron|art|aux|int|abbr|phr)\.?\s*/gi, '')
         .replace(/[\s；;，,。:：/（）()\[\]「」·&…]/g, '');
     };
-    var coreRaw = (detail.level_tag || '').trim();
-    var sideRaw = (detail.inline_def || (senses[0] && (senses[0].chinese_def || senses[0].def)) || '').trim();
+    var coreRaw = (w.level_tag || '').trim();
+    var sideRaw = (w.inline_def || (senses[0] && (senses[0].chinese_def || senses[0].def)) || '').trim();
     var coreText = normDef(coreRaw), sideText = normDef(sideRaw);
     var mergedDef = '';
     if (coreRaw && sideRaw) {
@@ -186,19 +187,19 @@ App.Utils = {
     } else {
       mergedDef = coreRaw || sideRaw;
     }
-    // 无富快照时, 右侧灰字回退到 beidanci 的中文释义
+    // 无富内容时, 右侧灰字回退到中文释义
     if (!mergedDef && w.chineseMeaning) mergedDef = w.chineseMeaning;
     var wordDefHtml = mergedDef ? '<span class="word-def">' + esc(mergedDef) + '</span>' : '';
-    var page = detail.page_no ? '<span style="font-size:11px;color:var(--muted)">P' + esc(detail.page_no) + '</span>' : '';
-    var partialTag = detail.partial ? '<span class="partial-tag" title="页尾被截断，扫描下一页会自动补全">待补全</span>' : '';
+    var page = w.page_no ? '<span style="font-size:11px;color:var(--muted)">P' + esc(w.page_no) + '</span>' : '';
+    var partialTag = w.partial ? '<span class="partial-tag" title="页尾被截断，扫描下一页会自动补全">待补全</span>' : '';
 
     var IDENTITY = { '*': '课标外', '⊕': '增补', '⊖': '删减', 'derived': '派生词' };
     var identityTag = '';
-    if (detail.identity_tag && IDENTITY[detail.identity_tag]) {
-      identityTag = '<span class="tag tag-identity id-' + esc(detail.identity_tag) + '" title="' + IDENTITY[detail.identity_tag] + '">' + esc(detail.identity_tag) + '</span>';
+    if (w.identity_tag && IDENTITY[w.identity_tag]) {
+      identityTag = '<span class="tag tag-identity id-' + esc(w.identity_tag) + '" title="' + IDENTITY[w.identity_tag] + '">' + esc(w.identity_tag) + '</span>';
     }
-    var derivedTag = detail.derived_from
-      ? '<span class="tag tag-derived" title="派生自 ' + esc(detail.derived_from) + '">派生自 ' + esc(detail.derived_from) + '</span>' : '';
+    var derivedTag = w.derived_from
+      ? '<span class="tag tag-derived" title="派生自 ' + esc(w.derived_from) + '">派生自 ' + esc(w.derived_from) + '</span>' : '';
 
     // ---- 蓝底标签框 (辨/注/同/反/高考链接 ...) ----
     var notesHtml = notes.map(function (n) {
@@ -215,26 +216,31 @@ App.Utils = {
       ? Math.round((w.knownCount / w.totalCount) * 100) + '%' : '-';
     var profTag = '<span class="study-tag custom" title="熟练度">' + esc(level.label + ' ' + profText) + '</span>';
 
-    // v1.23.0: 一比一复刻 Victor wordCardHtml —— 所有词卡都可点击展开,
-    // 不再按 hasRich 区分 data-expandable。无富快照时 body 显示一行中文释义。
+    // v1.24.0: 一比一复刻 Victor wordCardHtml —— 所有词卡都可点击展开,
+    // 无富内容时 body 显示一行中文释义。
     var bodyHtml = (sensesHtml || notesHtml)
       ? (sensesHtml + notesHtml)
       : '<div style="font-size:13px;color:var(--muted);padding:8px 0">' +
           (w.chineseMeaning ? esc(w.chineseMeaning) : '（无详细义项）') + '</div>';
 
-    var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.word));
+    var key = w.id != null ? ('id' + w.id) : ('hw' + esc(w.headword));
     var isProgress = w.totalCount > 0 && (w.knownCount / w.totalCount) >= 0.8;
+    // Victor 原版 word-actions 三态按钮 DOM (保留视觉, 交互逻辑按用户要求不接)
+    var actionsHtml = '<div class="word-actions">' +
+      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✓</span>已会</button>' +
+      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✕</span>不会</button>' +
+      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">📍</span>进度</button>' +
+      '</div>';
     return '<div class="word-card' + (isProgress ? ' is-progress' : '') + '"' +
-      ' id="wc-' + key + '" data-word-id="' + esc(w.id) + '"' +
-      ' data-derived="' + (detail.derived_from ? '1' : '0') + '">' +
+      ' id="wc-' + key + '" data-derived="' + (w.derived_from ? '1' : '0') + '">' +
       '<div class="word-row"><div class="word-swipe">' +
         '<div class="word-hd" data-expandable="1" data-key="' + key + '" role="button" aria-expanded="false" tabindex="0">' +
           '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
-          '<span class="word-name">' + esc(w.word) + '</span>' +
+          '<span class="word-name">' + esc(w.headword) + '</span>' +
           '<span class="word-ph">' + esc(w.phonetic || '') + '</span>' +
           profTag + identityTag + derivedTag + page + partialTag +
           wordDefHtml +
-        '</div>' +
+        '</div>' + actionsHtml +
       '</div></div>' +
       '<div class="word-body">' + bodyHtml + '</div>' +
     '</div>';
@@ -244,7 +250,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.23.0',
+  APP_VERSION: '1.24.0',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

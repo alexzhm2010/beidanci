@@ -145,9 +145,18 @@ App.Library = (function () {
     listEl.innerHTML = '<div class="vcard-placeholder">加载中…</div>';
     isLoading = true;
     try {
-      var words = await App.DB.getAllWords();
-      // 映射成 Victor 词对象 (headword/senses/notes/tags 等), 供 wordCardHtml 直接使用
-      allWords = words.map(toVictorWord);
+      // v1.24.0: 数据源改为 uw_* 四表嵌套查询 (Victor 结构化数据, 无快照)。
+      // 返回的词已是 Victor 词结构 (headword/senses/notes), 无需再映射 detail 快照。
+      allWords = await App.DB.getVictorWords();
+      // 补全渲染所需字段: chineseMeaning 供无义项回退, 熟练度 uw_* 无数据保持 0
+      allWords.forEach(function (w) {
+        if (!w.chineseMeaning && w.senses && w.senses.length) {
+          w.chineseMeaning = w.senses.map(function (s) { return s.chinese_def || ''; })
+            .filter(Boolean).join('；');
+        }
+        w.totalCount = w.totalCount || 0;
+        w.knownCount = w.knownCount || 0;
+      });
       // 按 A–Z 排序 (忽略大小写与符号前缀), 贴合 Victor 书本式顺序
       allWords.sort(function (a, b) {
         var ka = String(a.headword || '').replace(/^[^a-zA-Z]+/, '').toLowerCase();
@@ -176,21 +185,6 @@ App.Library = (function () {
     await loadWords(currentQuery);
   }
 
-  // 把 beidanci 词对象映射成 Victor 词库页所用的结构
-  function toVictorWord(w) {
-    return {
-      id: w.id,
-      headword: w.word || '',
-      phonetic: w.phonetic || '',
-      chineseMeaning: w.chineseMeaning || '',
-      partOfSpeech: w.partOfSpeech || '',
-      exampleSentence: w.exampleSentence || '',
-      totalCount: w.totalCount || 0,
-      knownCount: w.knownCount || 0,
-      detail: w.detail || null,
-    };
-  }
-
   // 依据搜索词过滤 (复刻 Victor computeFiltered: 英文词头 + 中文释义)
   function computeFiltered() {
     var q = (currentQuery || '').trim().toLowerCase();
@@ -198,16 +192,13 @@ App.Library = (function () {
     return allWords.filter(function (w) {
       if ((w.headword || '').toLowerCase().indexOf(q) !== -1) return true;
       if ((w.chineseMeaning || '').indexOf(q) !== -1) return true;
-      // 富内容: 义项中文释义 / 例句英文
-      var d = w.detail;
-      if (d && typeof d === 'object') {
-        var senses = Array.isArray(d.senses) ? d.senses : [];
-        for (var i = 0; i < senses.length; i++) {
-          if ((senses[i].chinese_def || '').indexOf(q) !== -1) return true;
-          var exs = Array.isArray(senses[i].examples) ? senses[i].examples : [];
-          for (var j = 0; j < exs.length; j++) {
-            if ((exs[j].en || '').toLowerCase().indexOf(q) !== -1) return true;
-          }
+      // 结构化富内容 (uw_* 四表): 义项中文释义 / 例句英文
+      var senses = Array.isArray(w.senses) ? w.senses : [];
+      for (var i = 0; i < senses.length; i++) {
+        if ((senses[i].chinese_def || '').indexOf(q) !== -1) return true;
+        var exs = Array.isArray(senses[i].examples) ? senses[i].examples : [];
+        for (var j = 0; j < exs.length; j++) {
+          if ((exs[j].en || '').toLowerCase().indexOf(q) !== -1) return true;
         }
       }
       return false;
