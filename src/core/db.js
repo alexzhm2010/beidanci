@@ -778,10 +778,88 @@ App.DB = (function () {
     return { words: words, total: total };
   }
 
+  // ========== v1.26.9: 义项显示层归一 (1:1 照搬 Victor 原版) ==========
+  // 嵌套查询按插入顺序返回 senses, 序号会乱 (如 4,2,5,3,1)。Victor 原版在
+  // 加载后统一做 dedupeSenses(去重) + orderSenses(按词性归组,组内按 sense_no 升序),
+  // 这里补上同样的处理, 让序号从 1 到 N 按印刷顺序排列。
+  function normPosFront(p) {
+    return String(p || '').trim().replace(/\./g, '').replace(/\s+/g, ' ').toLowerCase();
+  }
+  // 中文释义"纯度": 中文越多英文越少越高, 用于从重复义项里挑正确的释义
+  function hanScore(s) {
+    var str = String(s || '');
+    if (!str.trim()) return -1;
+    var han = (str.match(/[\u3400-\u9fff]/g) || []).length;
+    var latin = (str.match(/[A-Za-z]/g) || []).length;
+    return han - latin * 2;
+  }
+  // 按「归一化词性|义项号」合并重复义项: 释义取中文最纯的, 常考标取任一条, 例句按英文去重合并
+  function dedupeSenses(senses) {
+    if (!Array.isArray(senses)) return [];
+    var groups = new Map();
+    for (var i = 0; i < senses.length; i++) {
+      var s = senses[i];
+      var no = (s.sense_no != null ? s.sense_no : (s.no != null ? s.no : 0));
+      var key = normPosFront(s.pos) + '|' + no;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
+    }
+    var out = [];
+    groups.forEach(function (arr) {
+      var base = arr.reduce(function (a, b) { return (Number(b.id) || 0) > (Number(a.id) || 0) ? b : a; }, arr[0]);
+      base = Object.assign({}, base);
+      var best = arr[0];
+      for (var j = 0; j < arr.length; j++) {
+        if (hanScore(arr[j].chinese_def || arr[j].def) > hanScore(best.chinese_def || best.def)) best = arr[j];
+      }
+      if (hanScore(best.chinese_def || best.def) >= 0) base.chinese_def = best.chinese_def || best.def || base.chinese_def;
+      if (arr.some(function (x) { return Number(x.sense_freq) === 1; })) base.sense_freq = 1;
+      ['countability', 'usage_label', 'english_def', 'antonym'].forEach(function (f) {
+        if (!base[f]) { var hit = arr.find(function (x) { return x[f]; }); if (hit) base[f] = hit[f]; }
+      });
+      var seen = {}; var ex = [];
+      for (var k = 0; k < arr.length; k++) {
+        var items = arr[k].examples || arr[k].items || [];
+        for (var m = 0; m < items.length; m++) {
+          var e = items[m];
+          var ek = String(e.en || '').toLowerCase().replace(/[\s\p{P}]/gu, '');
+          if (ek && seen[ek]) continue;
+          if (ek) seen[ek] = true;
+          ex.push(e);
+        }
+      }
+      base.examples = ex;
+      out.push(base);
+    });
+    return out;
+  }
+  // 按词性首次出现先后归组, 组内按 sense_no 升序, 恢复书上印刷顺序
+  function orderSenses(senses) {
+    if (!Array.isArray(senses) || senses.length < 2) return senses || [];
+    var groups = new Map(); var posOrder = [];
+    senses.forEach(function (s, i) {
+      var p = normPosFront(s.pos) || '_';
+      if (!groups.has(p)) { groups.set(p, { first: i, items: [] }); posOrder.push(p); }
+      groups.get(p).items.push(s);
+    });
+    var out = [];
+    posOrder.forEach(function (p) {
+      var g = groups.get(p);
+      g.items.sort(function (a, b) {
+        var na = Number(a.sense_no != null ? a.sense_no : (a.no != null ? a.no : 0)) || 0;
+        var nb = Number(b.sense_no != null ? b.sense_no : (b.no != null ? b.no : 0)) || 0;
+        return na - nb;
+      });
+      out = out.concat(g.items);
+    });
+    return out;
+  }
+
   /**
    * v1.24.0: 从用户私有 Victor 四表 (uw_*) 嵌套查询拉全量词。
    * 字段与 Victor 底座 100% 同名, 供词库页 wordCardHtml 原版渲染, 无快照信息丢失。
    * 用 PostgREST 嵌套 select 带出 senses -> examples 与 notes; fetchAllPages 保证 >1000 条拉全。
+   * v1.26.9: senses 经 dedupeSenses + orderSenses 归一, 序号按印刷顺序升序。
    */
   async function getVictorWords() {
     var code = getSyncCode();
@@ -806,8 +884,10 @@ App.DB = (function () {
         page_no: r.page_no || null,
         partial: !!r.partial,
         tags: Array.isArray(r.tags) ? r.tags : [],
-        senses: (Array.isArray(r.uw_senses) ? r.uw_senses : []).map(function (s) {
+        // v1.26.9: 去重 + 按词性归组/组内 sense_no 升序 (1:1 复刻 Victor, 修复序号乱序)
+        senses: orderSenses(dedupeSenses((Array.isArray(r.uw_senses) ? r.uw_senses : []).map(function (s) {
           return {
+            id: s.id,
             pos: s.pos || '', sense_no: s.sense_no || 0, sense_freq: s.sense_freq || 0,
             countability: s.countability || '', usage_label: s.usage_label || '',
             chinese_def: s.chinese_def || '', english_def: s.english_def || '', antonym: s.antonym || '',
@@ -818,7 +898,7 @@ App.DB = (function () {
               };
             })
           };
-        }),
+        }))),
         notes: (Array.isArray(r.uw_notes) ? r.uw_notes : []).map(function (n) {
           return { note_type: n.note_type || '注', title: n.title || '', content: n.content || '' };
         }),
