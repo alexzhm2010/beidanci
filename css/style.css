@@ -483,7 +483,9 @@ input, textarea, select { font-family: inherit; outline: none; }
 .search-wrap input{flex:1;min-width:120px;height:40px;border:1px solid rgba(148,180,210,.4);border-radius:10px;
   padding:8px 10px 8px 34px;font-size:14px;background:var(--color-card);font-family:inherit;outline:none}
 .search-wrap input:focus{border-color:var(--ring);box-shadow:0 0 0 3px rgba(123,166,208,.28)}
-.library-quick-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+/* v1.26.8: 按钮并入吸顶搜索行(数字统计之后), 不换行不额外占位 */
+.library-quick-actions{display:flex;gap:6px;flex-wrap:nowrap;margin-bottom:0;flex-shrink:0}
+.library-quick-actions .btn{white-space:nowrap;padding:8px 12px;font-size:13px;min-height:40px}
 .list-summary{font-size:13px;color:var(--muted);white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums}
 .list-summary b{color:var(--primary-d);font-size:17px;font-weight:800}
 .list-summary .frac-sep{color:#b9c0cc;margin:0 2px;font-size:14px}
@@ -586,7 +588,10 @@ input, textarea, select { font-family: inherit; outline: none; }
   .victor-wordlist { padding: 6px 10px 10px; }
   .words-toolbar{gap:6px;padding:6px 0}
   .search-wrap{gap:6px}
-  .search-wrap input{min-width:0}
+  .search-wrap input{min-width:0;height:38px}
   .list-summary{font-size:12px}
   .list-summary b{font-size:15px}
+  /* v1.26.8: 移动端按钮同样并入搜索行, 覆盖全局 toolbar-buttons 的 grid 两列规则 */
+  .library-quick-actions{display:flex;gap:4px;flex-wrap:nowrap;margin-bottom:0}
+  .library-quick-actions .btn{padding:7px 7px;font-size:12px;min-height:38px}
 }

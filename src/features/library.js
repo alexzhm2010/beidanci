@@ -14,17 +14,17 @@ window.App = window.App || {};
 App.Library = (function () {
   // #view-library 的内部 HTML (迁移自 index.html, init() 首次挂载时注入)
   const HTML_TEMPLATE = `
-        <!-- v1.26.3: 搜索栏吸顶, 统计并入搜索行; 仅保留批量导入+同步Victor; 词表整页滚动高度自适应 -->
+        <!-- v1.26.8: 搜索栏吸顶; 统计+两个按钮并入同一行, 节约一行空间; 词表整页滚动高度自适应 -->
         <div class="words-toolbar">
           <div class="search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
             <input type="text" id="searchInput" placeholder="搜索英文单词或中文释义…" autocomplete="off">
             <div class="list-summary" id="listSummary"><b>0</b><span class="frac-sep">/</span>0</div>
           </div>
-        </div>
-        <div class="toolbar-buttons library-quick-actions">
-          <button class="btn btn-outline btn-sm" id="btnImport">批量导入</button>
-          <button class="btn btn-outline btn-sm" id="btnSyncVictor">同步 Victor</button>
+          <div class="toolbar-buttons library-quick-actions">
+            <button class="btn btn-outline btn-sm" id="btnImport">批量导入</button>
+            <button class="btn btn-outline btn-sm" id="btnSyncVictor">同步 Victor</button>
+          </div>
         </div>
         <div id="listView">
           <div id="wordCardList" class="victor-wordlist book-list"></div>
