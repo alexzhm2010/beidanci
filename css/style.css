@@ -490,7 +490,7 @@ input, textarea, select { font-family: inherit; outline: none; }
 .victor-wordlist .empty{text-align:center;padding:50px 20px;color:var(--muted)}
 .victor-wordlist .empty svg{width:54px;height:54px;stroke:#c3ccda;margin-bottom:12px}
 /* 回到顶部浮标 (v1.26.3): 仿淘宝右下角回到顶部, 滚动超过一屏淡入 */
-.back-to-top{position:fixed;right:18px;bottom:calc(var(--nav-height,56px) + 20px);z-index:80;
+.back-to-top{position:fixed;right:18px;bottom:calc(var(--tabbar-h, calc(var(--nav-height,56px) + env(safe-area-inset-bottom))) + 14px);z-index:80;
   width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;
   background:var(--color-card);color:var(--color-primary);border:1px solid rgba(148,180,210,.5);
   box-shadow:0 4px 14px rgba(70,115,160,.22);opacity:0;visibility:hidden;transform:translateY(12px);

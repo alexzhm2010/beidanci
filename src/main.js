@@ -84,6 +84,15 @@ App.updateStickyOffsets = function () {
     navH = nav.offsetHeight || 0;
   }
   document.documentElement.style.setProperty('--sticky-top', (headerH + navH) + 'px');
+
+  // v1.26.5: 测量底部 tab 栏实际高度(含安全区), 供「回到顶部」浮标定位。
+  // 移动端底栏为 fixed, 取实际高度; 桌面端底栏不固定在底部, 记 0。
+  // 折叠屏展开/折叠切换会触发 resize 重算, 浮标始终完整显示在底栏上方。
+  var tabbarH = 0;
+  if (nav && window.getComputedStyle(nav).position === 'fixed') {
+    tabbarH = Math.round(nav.getBoundingClientRect().height) || 0;
+  }
+  document.documentElement.style.setProperty('--tabbar-h', tabbarH + 'px');
 };
 
 // v1.10.0 admin 身份判断 (复用 auth.js 的 ADMIN_CODE 识别)
