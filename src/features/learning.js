@@ -556,6 +556,15 @@ App.Learning = (function () {
       var cnEl = item.querySelector('.prof-word-cn');
       if (cnEl) cnEl.classList.remove('hidden');
 
+      // v1.29.0: 选择"不认识"时自动展开该词富内容详情, 让用户第一时间看到详细解释内容。
+      // 复用 toggleDetail 的惰性渲染; 仅当详情处于收起状态时才展开, 已展开则保持不动(不误收起)。
+      if (answer === 'unknown') {
+        var detailBody = item.querySelector('.prof-word-detail[data-detail-body="' + idx + '"]');
+        if (detailBody && detailBody.hasAttribute('hidden')) {
+          toggleDetail(idx);
+        }
+      }
+
       // 隐藏按钮
       var actionsEl = item.querySelector('.prof-word-actions');
       if (actionsEl) actionsEl.classList.add('hidden');
