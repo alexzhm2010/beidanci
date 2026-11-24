@@ -7,8 +7,9 @@
  * 安全: API Key/Secret Key 从环境变量读取, 不硬编码, 不返回给前端
  *
  * 配置 (在 Supabase Dashboard > Edge Functions > Secrets 添加):
- *   BAIDU_API_KEY=aspJC8Q5YSRerSn02L9KeIJ8
+ *   BAIDU_API_KEY=<你的 API Key>       // v1.28.5: 占位符, 勿在代码/注释硬编码真实值
  *   BAIDU_SECRET_KEY=<你的 Secret Key>
+ *   ※ 若历史上曾在源码中明文出现, 请到百度智能云控制台轮换(禁用旧 Key 并新建)。
  *
  * 鉴权: 必须是管理员登录 (检查 user_auth.is_admin)
  *
