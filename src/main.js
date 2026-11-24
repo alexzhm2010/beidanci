@@ -25,15 +25,39 @@ App.VERSION = App.Config.APP_VERSION;  // 暴露给诊断面板等运行时检�
 
 // ========== 共享工具函数 ==========
 
+// v1.28.2: 弹窗无障碍 —— 保存打开前的焦点、锁 body 滚动、关闭时归还焦点
+var _modalLastFocus = null;
+var _modalOpen = false;
 App.showModal = function (title, bodyHTML) {
+  var overlay = document.getElementById('modalOverlay');
+  // 仅"从关闭到打开"时记录焦点与锁滚动, 避免 modal 内重复 showModal 覆盖
+  if (!_modalOpen) {
+    _modalLastFocus = document.activeElement;
+    document.body.style.overflow = 'hidden';
+  }
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalBody').innerHTML = bodyHTML;
-  document.getElementById('modalOverlay').classList.remove('hidden');
+  overlay.classList.remove('hidden');
+  _modalOpen = true;
+  // 焦点移入弹窗: 优先 body 内首个可聚焦元素, 否则关闭按钮
+  var first = document.getElementById('modalBody').querySelector(
+    'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])');
+  var focusTarget = first || document.getElementById('modalClose');
+  if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
 };
 
 App.hideModal = function () {
-  document.getElementById('modalOverlay').classList.add('hidden');
+  var overlay = document.getElementById('modalOverlay');
+  if (!overlay || overlay.classList.contains('hidden')) return;
+  overlay.classList.add('hidden');
   document.getElementById('modalBody').innerHTML = '';
+  _modalOpen = false;
+  document.body.style.overflow = '';
+  // 归还焦点到打开弹窗前的元素
+  if (_modalLastFocus && typeof _modalLastFocus.focus === 'function') {
+    try { _modalLastFocus.focus(); } catch (e) {}
+  }
+  _modalLastFocus = null;
 };
 
 App.showToast = function (message, type) {
@@ -128,11 +152,15 @@ App.initAdminNav = function () {
       App.switchTab(btn.dataset.tab);
     });
   });
+  // v1.28.2: admin 导航从 4 项变 6 项, 可能改变导航行高/底栏占位, 重算吸顶偏移
+  if (typeof App.updateStickyOffsets === 'function') App.updateStickyOffsets();
 };
 
 // ========== v1.11.0 按需懒加载功能页 ==========
 // 已加载的功能模块缓存 (避免重复 import/init)
 var _loadedFeatures = {};
+// v1.28.2: 正在加载中的模块 Promise (并发去重 —— 重复调用 await 同一个, 确保 init 完成后才返回)
+var _featureLoading = {};
 // v1.11.1: 已开始 prefetch 的 tab (去重, 避免重复发起 import)
 var _prefetched = {};
 
@@ -165,43 +193,54 @@ function prefetchFeature(tab) {
  */
 async function ensureFeature(tab) {
   if (_loadedFeatures[tab]) return;
-  _loadedFeatures[tab] = true; // 标记加载中, 防止并发重复 import
-  try {
-    switch (tab) {
-      case 'learning':
-        await import('./features/learning.js');
-        if (App.Learning && typeof App.Learning.init === 'function') App.Learning.init();
-        break;
-      case 'library':
-        await import('./features/library.js'); // library.js 内部 import './dictionary.js'
-        if (App.Library && typeof App.Library.init === 'function') App.Library.init();
-        break;
-      case 'stats':
-        await import('./features/stats.js');
-        if (App.Stats && typeof App.Stats.init === 'function') App.Stats.init();
-        break;
-      case 'dashboard':
-      case 'wordbook':
-      case 'users':
-      case 'settings':
-        // admin 4 个 tab 共用 admin.js, 只加载一次
-        if (!App.Admin) {
-          await import('./features/admin.js');
-        }
-        break;
-      case 'dictimport':
-        // v1.12.0 词典导入: admin.js 内部会再 import dictionary-import.js
-        if (!App.Admin) {
-          await import('./features/admin.js');
-        }
-        break;
-      // profile 不懒加载 (定义在本文件, 登录后立即需要)
+  // v1.28.2: 若该模块正在被另一个调用者加载, 复用同一个 Promise 并等待其完成。
+  // 旧实现仅置 _loadedFeatures[tab]=true, 并发调用者直接 return, 会在 init 完成前
+  // 执行 show(), 导致首屏后台 prefetch 未结束时点进词库出现渲染异常。
+  if (_featureLoading[tab]) return await _featureLoading[tab];
+
+  var loadPromise = (async function () {
+    try {
+      switch (tab) {
+        case 'learning':
+          await import('./features/learning.js');
+          if (App.Learning && typeof App.Learning.init === 'function') App.Learning.init();
+          break;
+        case 'library':
+          await import('./features/library.js'); // library.js 内部 import './dictionary.js'
+          if (App.Library && typeof App.Library.init === 'function') App.Library.init();
+          break;
+        case 'stats':
+          await import('./features/stats.js');
+          if (App.Stats && typeof App.Stats.init === 'function') App.Stats.init();
+          break;
+        case 'dashboard':
+        case 'wordbook':
+        case 'users':
+        case 'settings':
+          // admin 4 个 tab 共用 admin.js, 只加载一次
+          if (!App.Admin) {
+            await import('./features/admin.js');
+          }
+          break;
+        case 'dictimport':
+          // v1.12.0 词典导入: admin.js 内部会再 import dictionary-import.js
+          if (!App.Admin) {
+            await import('./features/admin.js');
+          }
+          break;
+        // profile 不懒加载 (定义在本文件, 登录后立即需要)
+      }
+      _loadedFeatures[tab] = true;
+    } catch (e) {
+      _loadedFeatures[tab] = false; // 加载失败允许重试
+      console.error('[ensureFeature] 加载失败', tab, e);
+      App.showToast('页面加载失败: ' + (e && e.message ? e.message : String(e)), 'error');
+    } finally {
+      delete _featureLoading[tab];
     }
-  } catch (e) {
-    _loadedFeatures[tab] = false; // 加载失败允许重试
-    console.error('[ensureFeature] 加载失败', tab, e);
-    App.showToast('页面加载失败: ' + (e && e.message ? e.message : String(e)), 'error');
-  }
+  })();
+  _featureLoading[tab] = loadPromise;
+  return await loadPromise;
 }
 
 // v1.11.1 性能优化: 注入骨架屏到目标 view, 防止切 tab 时空白闪烁
@@ -606,7 +645,27 @@ document.addEventListener('DOMContentLoaded', function () {
     if (e.target === this) App.hideModal();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') App.hideModal();
+    var ov = document.getElementById('modalOverlay');
+    var isOpen = ov && !ov.classList.contains('hidden');
+    // v1.28.2: 仅当弹窗确实打开时才响应 ESC, 避免无关场景的空操作
+    if (e.key === 'Escape') {
+      if (isOpen) App.hideModal();
+      return;
+    }
+    // v1.28.2: 弹窗内 Tab 焦点陷阱 —— 焦点只在弹窗内循环, 不逃逸到背景
+    if (e.key === 'Tab' && isOpen) {
+      var focusables = Array.prototype.slice.call(
+        ov.querySelectorAll('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])'))
+        .filter(function (el) { return !el.disabled && el.offsetParent !== null; });
+      if (!focusables.length) return;
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+      }
+    }
   });
 
   // 3. 启动授权系统 (Auth.init 内部会在授权通过后调用 initializeApp)
