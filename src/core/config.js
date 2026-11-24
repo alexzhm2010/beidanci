@@ -269,12 +269,8 @@ App.Utils = {
   renderVictorCard: function (w) {
     var p = App.Utils._composeVictor(w, { noJump: false });
     var esc = p.esc;
-    // Victor 原版 word-actions 三态按钮 DOM (保留视觉, 交互逻辑按用户要求不接)
-    var actionsHtml = '<div class="word-actions">' +
-      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✓</span>已会</button>' +
-      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">✕</span>不会</button>' +
-      '<button class="act-btn" type="button" tabindex="-1"><span class="ico">📍</span>进度</button>' +
-      '</div>';
+    // v1.28.4: 移除词卡内永久隐藏(opacity:0/pointer-events:none)且无事件的三态按钮 DOM,
+    // 每词卡少 3 个死节点, 数千词列表显著减少 DOM 体积。学习卡的真实按钮不受影响。
     return '<div class="word-card' + (p.isProgress ? ' is-progress' : '') + '"' +
       ' id="wc-' + p.key + '" data-word-id="' + esc(w.id) + '"' +
       ' data-derived="' + (w.derived_from ? '1' : '0') + '">' +
@@ -285,7 +281,7 @@ App.Utils = {
           '<span class="word-ph">' + esc(w.phonetic || '') + '</span>' +
           p.profTag + p.identityTag + p.derivedTag + p.page + p.partialTag +
           p.wordDefHtml +
-        '</div>' + actionsHtml +
+        '</div>' +
       '</div></div>' +
       '<div class="word-body">' + p.bodyHtml + p.relationsHtml + '</div>' +
     '</div>';
@@ -305,7 +301,7 @@ App.Utils = {
 App.Config = {
   // 应用信息
   APP_NAME: '背单词',
-  APP_VERSION: '1.28.3',
+  APP_VERSION: '1.28.4',
 
   // IndexedDB 配置
   DB_NAME: 'BeidanciDB',

@@ -638,29 +638,39 @@ App.Learning = (function () {
     }
   }
 
-  /** 保存熟练度复习记录 (加入串行队列, 避免并发请求卡死) */
-  function saveProfAnswer(word, answer) {
+  /**
+   * v1.28.4: 答题持久化公共实现 (原 saveAnswer / saveProfAnswer 逻辑几乎完全重复)。
+   * 统一走串行保存队列, 差异仅 direction / sessionType / 日志前缀, 由 opts 传入。
+   */
+  function persistAnswer(word, answer, opts) {
     var isKnown = answer === 'known' || answer === 'familiar';
     enqueueSave(async function () {
       try {
         var updated = await App.DB.updateWord(word);
         if (!updated || !updated.id) {
-          console.warn('[ProfReview] updateWord 返回空, 单词:', word.word, '可能 user_id 不匹配被 RLS 拒绝');
+          console.warn('[' + opts.logTag + '] updateWord 返回空, 单词:', word.word, '可能 user_id 不匹配被 RLS 拒绝');
         }
         await App.DB.addRecord({
           wordId: word.id,
           word: word.word,
-          // 熟练度/字母复习窗口固定展示"英文+音标 → 中文释义", 即 en2cn, 与界面一致
-          direction: 'en2cn',
+          direction: opts.direction,
           isKnown: isKnown,
-          sessionType: answer === 'familiar' ? 'familiar' : 'review',
+          sessionType: answer === 'familiar' ? 'familiar' : opts.sessionType,
         });
         // v1.28.1: 答题改了熟练度, 温和失效词库缓存指纹, 下次进词库后台刷新会修正陈旧数据
         if (App.Library && typeof App.Library.markStale === 'function') App.Library.markStale();
       } catch (e) {
-        console.error('保存复习记录失败:', e.message);
+        console.error('保存' + opts.logLabel + '失败:', e.message);
         App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);
       }
+    });
+  }
+
+  /** 保存熟练度复习记录 (加入串行队列, 避免并发请求卡死) */
+  function saveProfAnswer(word, answer) {
+    // 熟练度/字母复习窗口固定展示"英文+音标 → 中文释义", 即 en2cn, 与界面一致
+    persistAnswer(word, answer, {
+      direction: 'en2cn', sessionType: 'review', logTag: 'ProfReview', logLabel: '复习记录',
     });
   }
 
@@ -794,26 +804,10 @@ App.Learning = (function () {
   function saveAnswer(word, answer) {
     var s = state.session;
     // 会拼写按"认识"计入记录 (统计正确率时算掌握)
-    var isKnown = answer === 'known' || answer === 'familiar';
-    enqueueSave(async function () {
-      try {
-        var updated = await App.DB.updateWord(word);
-        if (!updated || !updated.id) {
-          console.warn('[Learning] updateWord 返回空, 单词:', word.word, '可能 user_id 不匹配被 RLS 拒绝');
-        }
-        await App.DB.addRecord({
-          wordId: word.id,
-          word: word.word,
-          direction: (s && s.mode) || state.mode || 'en2cn',
-          isKnown: isKnown,
-          sessionType: answer === 'familiar' ? 'familiar' : (s ? s.type : 'review'),
-        });
-        // v1.28.1: 答题改了熟练度, 温和失效词库缓存指纹, 下次进词库后台刷新会修正陈旧数据
-        if (App.Library && typeof App.Library.markStale === 'function') App.Library.markStale();
-      } catch (e) {
-        console.error('保存学习记录失败:', e.message);
-        App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);
-      }
+    persistAnswer(word, answer, {
+      direction: (s && s.mode) || state.mode || 'en2cn',
+      sessionType: s ? s.type : 'review',
+      logTag: 'Learning', logLabel: '学习记录',
     });
   }
 

@@ -323,78 +323,9 @@ App.DictImport = (function () {
     // 百度 OCR 是无状态服务, 前端没有需要释放的资源
   }
 
-  /** File → Canvas (等比缩放, 手机大图安全) — 保留, 预览图片用 */
-  function fileToCanvas(file, maxEdge) {
-    maxEdge = maxEdge || 2400;
-    return new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onerror = function () { reject(new Error('图片读取失败')); };
-      reader.onload = function () {
-        var img = new Image();
-        img.onerror = function () { reject(new Error('图片解码失败')); };
-        img.onload = function () {
-          var w = img.naturalWidth, h = img.naturalHeight;
-          var scale = Math.min(1, maxEdge / Math.max(w, h));
-          var canvas = document.createElement('canvas');
-          canvas.width = Math.round(w * scale);
-          canvas.height = Math.round(h * scale);
-          var ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas);
-        };
-        img.src = reader.result;
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-
-  /** 图像预处理: 灰度化 + 对比度增强 + 二值化 (提升词典印刷体识别率) — 保留, 预览时可用 */
-  function preprocessImage(canvas) {
-    var w = canvas.width, h = canvas.height;
-    var ctx = canvas.getContext('2d');
-    var imageData = ctx.getImageData(0, 0, w, h);
-    var data = imageData.data;
-    var gray = new Uint8ClampedArray(w * h);
-    var sum = 0;
-    for (var i = 0, j = 0; i < data.length; i += 4, j++) {
-      gray[j] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-      sum += gray[j];
-    }
-    var avg = sum / gray.length;
-    var contrast = 1.8;
-    var out = ctx.createImageData(w, h);
-    var outData = out.data;
-    var threshold = avg * 0.7;
-    for (var n = 0; n < gray.length; n++) {
-      var val = gray[n] > threshold ? 255 : 0;
-      outData[n * 4] = val; outData[n * 4 + 1] = val; outData[n * 4 + 2] = val; outData[n * 4 + 3] = 255;
-    }
-    ctx.putImageData(out, 0, 0);
-    return canvas;
-  }
-
-  // 占位函数 - 替换原 Tesseract 诊断面板入口, 已不再需要
-  function runDiagnostics() {
-    var panel = document.getElementById('diagPanel');
-    if (panel) {
-      panel.style.display = 'block';
-      panel.textContent = 'OCR 诊断已弃用 (v1.16.0 改用百度 OCR, 无本地依赖)';
-    }
-  }
-
-  function showDiagResult() {}
-
-  // ===== 删除以下 v1.13.x Tesseract 相关代码 (720 行) =====
-  //   - getOcrAssetUrl, openIDB, idbGet, idbPut (IndexedDB 缓存)
-  //   - TESSDATA_SOURCES, raceDownload (多 CDN race)
-  //   - loadScript, withTimeout, fetchWithProgress (下载逻辑)
-  //   - initDirectOcr (Tesseract 初始化 + MEMFS + TessBaseAPI.Init)
-  //   - 旧 ocrImage (本地 OCR 主线程调用)
-  //   - runDiagnostics 完整诊断面板 (Tesseract 专用)
-  //   上述函数已被上方百度 OCR 实现替代
-  // ===== 删除结束 =====
+  // v1.28.4: 删除 Tesseract 时代遗留的无调用函数 fileToCanvas / preprocessImage /
+  // runDiagnostics / showDiagResult 及其删除说明注释。百度 OCR 为无状态服务, 这些
+  // 本地图片处理/诊断函数均未被调用 (closeOcrWorker 仍被 startParse 调用, 保留)。
 
   // ========== HTML 模板 ==========
   function containerHtml() {

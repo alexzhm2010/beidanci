@@ -558,14 +558,7 @@ input, textarea, select { font-family: inherit; outline: none; }
 .victor-wordlist .study-tag.custom { background:#ede9fe; color:#6d28d9; }
 .victor-wordlist .word-row { position:relative; overflow:hidden; border-radius:4px; }
 .victor-wordlist .word-swipe { overflow:hidden; }
-/* Victor 原版左滑三态操作条 DOM 视觉 (用户要求不接交互, 默认隐藏; 保留结构一致) */
-.victor-wordlist .word-actions{position:absolute;right:0;top:0;bottom:0;width:55%;display:flex;align-items:stretch;
-  gap:4px;padding:2px 0 2px 6px;box-sizing:border-box;opacity:0;pointer-events:none;
-  background:linear-gradient(90deg,rgba(255,250,240,0),rgba(239,246,255,.7) 30%)}
-.victor-wordlist .act-btn{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--card);
-  font-family:inherit;font-size:12px;font-weight:700;color:var(--muted);cursor:pointer;
-  display:flex;align-items:center;justify-content:center;gap:3px;white-space:nowrap;min-height:34px}
-.victor-wordlist .act-btn .ico{font-size:13px;line-height:1}
+/* v1.28.4: 已移除永久隐藏的三态按钮 DOM, 对应 .word-actions/.act-btn 死样式一并删除 */
 .victor-wordlist .word-card.is-progress { box-shadow:inset 3px 0 0 #f59e0b; background:rgba(251,191,36,.06); border-radius:4px; }
 /* 义项：实心圆序号 + 彩色词性 */
 .victor-wordlist .sense { padding:5px 0 2px; border-bottom:1px dashed #e6dcc4; }
