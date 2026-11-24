@@ -19,6 +19,10 @@ App.DB = (function () {
   // 减少 tab 切换时的重复 RPC (同一份数据在多个 tab 间复用)
   // 30 秒过期, 任何写操作 (addWord/updateWord/deleteWord/addWordsBatch/addRecord) 立即失效
   var CACHE_TTL_MS = 30000;
+  // v1.28.1: 掌握阈值单一口径 0.80 —— 与服务端 RPC get_letter_distribution /
+  // get_proficiency_stats (setup_stats_aggregation.sql) 及 stats.js 保持一致。
+  // 历史 getMasteredWordCount 曾误用 0.85, 导致统计页/字母方块"掌握数"互相矛盾。
+  var MASTERED_RATIO = 0.80;
   var _cache = {};
 
   function _cacheGet(key) {
@@ -564,7 +568,7 @@ App.DB = (function () {
       if (!rows || rows.length === 0) break;
       for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
-        if (r.known_count && r.total_count && r.known_count / r.total_count >= 0.85) count++;
+        if (r.known_count && r.total_count && r.known_count / r.total_count >= MASTERED_RATIO) count++;
       }
       if (rows.length < PAGE) break;
       offset += PAGE;
@@ -651,7 +655,7 @@ App.DB = (function () {
       var letter = w.word.charAt(0).toUpperCase();
       var key = stats[letter] ? letter : '#';
       stats[key].total++;
-      if (w.totalCount > 0 && w.knownCount / w.totalCount >= 0.80) {
+      if (w.totalCount > 0 && w.knownCount / w.totalCount >= MASTERED_RATIO) {
         stats[key].mastered++;
       } else {
         stats[key].unmastered++;
@@ -713,7 +717,7 @@ App.DB = (function () {
     words.forEach(function (w) {
       if (!w.totalCount || w.totalCount === 0) return;
       var p = w.knownCount / w.totalCount;
-      if (p >= 0.80) { mastered++; profDist[80]++; }
+      if (p >= MASTERED_RATIO) { mastered++; profDist[80]++; }
       else if (p >= 0.60) profDist[60]++;
       else if (p >= 0.40) profDist[40]++;
       else profDist[0]++;
@@ -730,7 +734,7 @@ App.DB = (function () {
     words.forEach(function (w) {
       if (!w.totalCount || w.totalCount === 0) return;
       var p = w.knownCount / w.totalCount;
-      if (p >= 0.80) profDist[80]++;
+      if (p >= MASTERED_RATIO) profDist[80]++;
       else if (p >= 0.60) profDist[60]++;
       else if (p >= 0.40) profDist[40]++;
       else profDist[0]++;
@@ -1522,8 +1526,8 @@ App.DB = (function () {
   /** 丢弃批次 */
   async function dictDiscardImport(importId) {
     return await api('PATCH', 'dictionary_imports',
-      { status: 'discarded' },
-      'id=eq.' + encodeURIComponent(importId));
+      'id=eq.' + encodeURIComponent(importId),
+      { status: 'discarded' });
   }
 
   // ========== 导出 ==========

@@ -650,6 +650,8 @@ App.Learning = (function () {
           isKnown: isKnown,
           sessionType: answer === 'familiar' ? 'familiar' : 'review',
         });
+        // v1.28.1: 答题改了熟练度, 温和失效词库缓存指纹, 下次进词库后台刷新会修正陈旧数据
+        if (App.Library && typeof App.Library.markStale === 'function') App.Library.markStale();
       } catch (e) {
         console.error('保存复习记录失败:', e.message);
         App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);
@@ -801,6 +803,8 @@ App.Learning = (function () {
           isKnown: isKnown,
           sessionType: answer === 'familiar' ? 'familiar' : (s ? s.type : 'review'),
         });
+        // v1.28.1: 答题改了熟练度, 温和失效词库缓存指纹, 下次进词库后台刷新会修正陈旧数据
+        if (App.Library && typeof App.Library.markStale === 'function') App.Library.markStale();
       } catch (e) {
         console.error('保存学习记录失败:', e.message);
         App.showToast('保存失败: ' + word.word + ' (' + e.message + ')', 'error', 3000);

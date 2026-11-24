@@ -444,6 +444,12 @@ App.Library = (function () {
     _hasCache = false;
     _lastSignature = '';
   }
+  // v1.28.1: 温和失效 —— 仅作废旧缓存指纹, 保留 _hasCache 以维持"0等待"命中缓存渲染。
+  // 下次 show() 命中缓存后照常渲染, 但 refreshInBackground() 因 _lastSignature 为空
+  // 会强制重新渲染一次 (指纹比对失效), 从而修正答题后陈旧的熟练度, 又不牺牲首屏速度。
+  function markStale() {
+    _lastSignature = '';
+  }
   // 启动预取: 后台静默拉取词库进缓存, 用户首次点进词库即可 0 等待
   function prefetch() {
     if (_hasCache || _refreshing || isLoading) return;
@@ -1724,6 +1730,7 @@ App.Library = (function () {
     jumpToWord: jumpToWord,
     prefetch: prefetch,
     invalidateCache: invalidateCache,
+    markStale: markStale,
     buildRelationGraph: buildRelationGraph,
     relationsOf: relationsOf,
     normHw: normHw,

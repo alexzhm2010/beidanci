@@ -259,7 +259,9 @@ input, textarea, select { font-family: inherit; outline: none; }
 .prof-word-text { font-size: 16px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
 .prof-word-phonetic { font-size: 12px; color: var(--color-text-lighter); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* v1.28.0: 词条详情下拉容器 (复用词库 .victor-wordlist 词卡样式) */
-.prof-word-detail { margin: 0 0 2px; padding: 2px 10px 8px; background: var(--color-bg); border-radius: var(--radius-sm); }
+/* v1.28.1: 提高特异性到 0,2,0 —— 详情容器同时带 .victor-wordlist,
+   后者的 background/padding/border (0,1,0) 原本会覆盖这里的容器样式。 */
+.prof-word-detail.victor-wordlist { margin: 0 0 2px; padding: 2px 10px 8px; background: var(--color-bg); border-radius: var(--radius-sm); box-shadow: none; border-color: transparent; }
 .prof-word-detail[hidden] { display: none; }
 .prof-word-detail .word-card { border-bottom: none; padding: 4px 0 0; }
 .prof-word-detail .word-body { display: block !important; padding: 2px 0 0; }
@@ -353,7 +355,7 @@ input, textarea, select { font-family: inherit; outline: none; }
   .prof-word-cn { flex: 1 1 auto; }
   .prof-word-actions .btn-sm { padding: 12px 8px; font-size: 16px; min-height: 44px; }
   .prof-word-prof { font-size: 14px; }
-  .prof-word-detail { padding: 2px 6px 8px; }
+  .prof-word-detail.victor-wordlist { padding: 2px 6px 8px; }
   .yearly-nav { gap: 8px; }
   @keyframes toastSlideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 }
