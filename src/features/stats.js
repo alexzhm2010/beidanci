@@ -100,14 +100,14 @@ App.Stats = (function () {
       // 并行拉取:
       //   1. getProficiencyStats — 服务端聚合 total/new/learned/mastered + 4 档熟练度分布 (几十字节)
       //   2. getLearnedWords(lightweight) — 仅 due/upcoming 计算需要, 跳过 example_sentence 等大字段
-      //   3. getRecords(yearStart) — 当年学习记录
-      // 记录只拉取当年1月1日至今 (日历/近7天/月度/年度看板都只用到当年数据, 相比2年数据量减半)
-      var yearStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0).getTime();
-
+      //   3. getRecords — 全部学习记录
+      // v1.28.3: 修"回翻往年全空"——旧实现只拉当年1月1日至今, 但日历可回翻上月、
+      // 年度看板可翻上一年, 看去年数据时全 0, 用户误判数据丢失。改为全量取数;
+      // getRecords 有 TTL 缓存, buildAggregates 按年月分桶, 各年份数据均正确。
       var results = await Promise.all([
         App.DB.getProficiencyStats(),
         App.DB.getLearnedWords(undefined, { lightweight: true }),
-        App.DB.getRecords(yearStart).catch(function (e) { console.error('加载学习记录失败:', e); return []; }),
+        App.DB.getRecords().catch(function (e) { console.error('加载学习记录失败:', e); return []; }),
       ]);
 
       var profStats = results[0] || { total: 0, new: 0, learned: 0, mastered: 0, prof_dist: { 0: 0, 40: 0, 60: 0, 80: 0 } };

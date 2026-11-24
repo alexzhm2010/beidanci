@@ -129,6 +129,8 @@ App.Learning = (function () {
       letterGrid.addEventListener('click', function (e) {
         var block = e.target.closest('.letter-block');
         if (!block) return;
+        // v1.28.3: 空方块(total=0)无词可复习, 跳过取数与"暂无单词"提示
+        if (block.classList.contains('is-empty')) return;
         var letter = block.dataset.letter;
         if (!letter) return;
         startLetterReview(letter);
@@ -203,7 +205,10 @@ App.Learning = (function () {
       function hueFor(actionable, total) {
         if (total === 0) return 120;
         var r = actionable / total;
-        var norm = rRange > 0 ? (r - rMin) / rRange : 0; // 0=最好, 1=最差
+        // v1.28.3: rRange=0(各字母可作答占比相同)时, 旧的 norm=0 会让全部变绿,
+        // 即使 100% 待复习也显绿, 与"绿=掌握好"语义相反。
+        // 改用绝对值兜底: norm=r, 即可作答占比越高越红(差), 越低越绿(好)。
+        var norm = rRange > 0 ? (r - rMin) / rRange : r; // 0=最好, 1=最差
         return (1 - norm) * 120; // 最差->0°红, 最好->120°绿
       }
 

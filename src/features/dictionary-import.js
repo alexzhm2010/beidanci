@@ -944,15 +944,19 @@ App.DictImport = (function () {
     document.getElementById('btnViewDetail').addEventListener('click', function () {
       showImportDetail(importId);
     });
-    document.getElementById('btnPublishNow').addEventListener('click', async function () {
-      try {
-        App.showToast('正在发布...', 'info');
-        var result = await App.DB.dictPublishImport(importId);
-        App.showToast('发布成功: ' + result.published + ' 个新词' + (result.merged > 0 ? ', ' + result.merged + ' 个已存在跳过' : ''), 'success');
-        showHistory();
-      } catch (e) {
-        App.showToast('发布失败: ' + e.message, 'error');
-      }
+    document.getElementById('btnPublishNow').addEventListener('click', function () {
+      // v1.28.3: 二次确认 —— OCR 解析结果自动标 accepted, 正则可能误识别,
+      // 直接发布会让错词未经校对写入正式词库。提示先"查看解析结果"核对。
+      App.showConfirm('即将把本批次全部词条写入正式词库。OCR 解析可能存在误识别，建议先点「查看解析结果」核对后再发布。确定继续发布吗？', async function () {
+        try {
+          App.showToast('正在发布...', 'info');
+          var result = await App.DB.dictPublishImport(importId);
+          App.showToast('发布成功: ' + result.published + ' 个新词' + (result.merged > 0 ? ', ' + result.merged + ' 个已存在跳过' : ''), 'success');
+          showHistory();
+        } catch (e) {
+          App.showToast('发布失败: ' + e.message, 'error');
+        }
+      });
     });
     document.getElementById('btnNewImport').addEventListener('click', showUpload);
   }

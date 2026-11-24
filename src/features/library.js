@@ -97,6 +97,8 @@ App.Library = (function () {
     var debouncedSearch = App.Utils.debounce(function () {
       currentQuery = document.getElementById('searchInput').value || '';
       resetWordList();
+      // v1.28.3: 搜索重建后回到顶部, 避免滚到中部搜索、结果变少时视口停在旧位置看不到结果
+      window.scrollTo({ top: 0, behavior: 'instant' });
     }, 180);
     document.getElementById('searchInput').addEventListener('input', debouncedSearch);
 
